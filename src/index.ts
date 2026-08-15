@@ -307,7 +307,7 @@ function portFree(p) {
         try { process.exit(0) } catch { /* ignore */ }
       }
     }, delayMs)
-    return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启，约 10 秒后恢复' }
+    return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启，约 10 秒后恢复。重启完成后 GET /api/dsh-restart-button/health 会返回 restarted:true 与 fromInstanceId 以确认新实例。' }
   } catch (e) {
     return { ok: false, action: 'restart', error: e.message }
   }
@@ -345,7 +345,7 @@ function shutdownDsh(ctx, res) {
       // command result flushes.
       setTimeout(exitSoon, 300).unref()
     }
-    return { ok: true, action: 'shutdown', note: 'DeepSeek Harness 正在关机' }
+    return { ok: true, action: 'shutdown', note: 'DeepSeek Harness 正在关机（进程停止后需手动重新启动）' }
   } catch (e) {
     return { ok: false, action: 'shutdown', error: e.message }
   }
