@@ -45,6 +45,15 @@
  */
 declare const name = "dsh-restart-button";
 declare const inject: string[];
+/** Plugin configuration (editable via the profile's cordis config / settings). */
+interface Config {
+  /** Register the `restart_harness` model tool. Off by default: allowing the
+   * model to restart the whole harness is a higher-privilege action than the
+   * GUI power button, so it is opt-in. */
+  enableModelTool: boolean;
+  /** Upper bound (ms) for the model tool's delayMs argument. */
+  maxDelayMs: number;
+}
 declare function apply(ctx: any): void;
 //#endregion
-export { apply, inject, name };
+export { Config, apply, inject, name };
