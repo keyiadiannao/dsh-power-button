@@ -49,10 +49,10 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools', 'commands', 'agents', 'sessions']
+export const inject = ['webServer', 'tools', 'commands', 'agents', 'sessions', 'sessionPersistence']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -147,14 +147,18 @@ function consumeRestartConfirmation(): { fromInstanceId: string } | null {
   return { fromInstanceId: oldId }
 }
 
-/** Session ids that were mid-turn (running) at restart time. */
+/** Session ids that were live (open) at restart time. Recording every live
+ * session — not only agents currently mid-turn — makes the "已重启"
+ * confirmation appear even when the restarted session's agent happened to be
+ * idle at the moment of the restart (e.g. a GUI-button restart while the
+ * conversation is quiet, or a message that arrived just before the exit). */
 function runningSessionIds(ctx): string[] {
   try {
-    return [...new Set(
-      ctx.agents.roots()
-        .filter((agent: { status?: string }) => agent.status === 'running')
-        .map((agent: { id: unknown }) => String(agent.id)),
-    )]
+    const live = ctx.sessions.list().map((session) => String(session.id))
+    const running = ctx.agents.roots()
+      .filter((agent: { status?: string }) => agent.status === 'running')
+      .map((agent: { id: unknown }) => String(agent.id))
+    return [...new Set([...live, ...running])]
   } catch {
     return []
   }
@@ -346,17 +350,39 @@ function portFree(p) {
       windowsHide: true,
     })
     helper.unref()
-    // Schedule the old process to exit AFTER the HTTP response flushes.
-    // Prefer DSH's `ctx.appExit` (graceful tree dispose); fall back to
-    // process.exit in non-standard embeddings.
-    setTimeout(() => {
-      const appExit = ctx.appExit
-      if (typeof appExit === 'function') {
-        appExit(0)
+    // Flush every live session BEFORE the exit timer starts: the write-behind
+    // buffer must be durably on disk before the helper respawns the new
+    // instance. A user message arriving during the exit window would
+    // otherwise still be buffered here when the new process reads the log —
+    // the two writers then interleave seq numbers on the same file (the
+    // corruption seen when a message races a restart). The dispose walk
+    // flushes again as a backstop; this makes the restart decision point the
+    // durability barrier.
+    const scheduleExit = (): void => {
+      // Schedule the old process to exit AFTER the HTTP response flushes.
+      // Prefer DSH's `ctx.appExit` (graceful tree dispose); fall back to
+      // process.exit in non-standard embeddings.
+      setTimeout(() => {
+        const appExit = ctx.appExit
+        if (typeof appExit === 'function') {
+          appExit(0)
+        } else {
+          try { process.exit(0) } catch { /* ignore */ }
+        }
+      }, delayMs)
+    }
+    try {
+      const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
+      if (live.length === 0) {
+        scheduleExit()
       } else {
-        try { process.exit(0) } catch { /* ignore */ }
+        Promise.allSettled(live.map((session) => ctx.sessions.flush(session)))
+          .then(scheduleExit)
+          .catch(scheduleExit)
       }
-    }, delayMs)
+    } catch {
+      scheduleExit()
+    }
     return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启' }
   } catch (e) {
     return { ok: false, action: 'restart', error: e.message }
@@ -376,12 +402,28 @@ function portFree(p) {
  */
 function shutdownDsh(ctx, res) {
   try {
-    const exitSoon = (): void => {
+    const exitNow = (): void => {
       const appExit = ctx.appExit
       if (typeof appExit === 'function') {
         appExit(0)
       } else {
         try { process.exit(0) } catch { /* ignore */ }
+      }
+    }
+    // Flush every live session before exiting so the write-behind buffer is
+    // durably on disk — same durability barrier as the restart path.
+    const exitSoon = (): void => {
+      try {
+        const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
+        if (live.length === 0) {
+          exitNow()
+          return
+        }
+        Promise.allSettled(live.map((session) => ctx.sessions.flush(session)))
+          .then(exitNow)
+          .catch(exitNow)
+      } catch {
+        exitNow()
       }
     }
     if (res !== undefined && typeof res.once === 'function') {
@@ -470,13 +512,25 @@ function releasePowerTransition(): void {
 }
 
 /**
- * After a restart, append a visible "restart complete" user message to each
- * recorded session — the UI renders it directly from the session event log,
- * so it does NOT depend on the agent being alive and does NOT wake any LLM
- * turn (zero token cost). The message becomes part of the session context for
- * the next natural turn, which is fine: it is a plain notice, not a prompt.
- * Polls the session store briefly (a resumed session may not be live yet);
- * clears the marker once all notices are appended.
+ * After a restart, append a visible "restart complete" ASSISTANT message to
+ * each recorded session — the UI renders it as a normal AI reply, which is
+ * the semantically correct owner: the assistant informs the user that the
+ * harness restarted. It is written straight into the session event log, so
+ * it does NOT depend on the agent being alive and does NOT wake any LLM turn
+ * (zero token cost). The message becomes part of the session context for the
+ * next natural turn, which is fine: it is a plain notice, not a prompt.
+ *
+ * The event is an `assistant/message` carrying turn 0 / step 0 — a step
+ * number real turns never use (steps start at 1), so it groups into its own
+ * assistant bubble at the log tail without colliding with any historical
+ * turn/step. It carries no usage, so token meters ignore it.
+ *
+ * Write safety (the corruption seen when a user message races a restart):
+ * the session's durable file must stop changing before we append (a dying
+ * predecessor still draining its write-behind buffer keeps appending), and
+ * the append is immediately flushed. Polls the session store briefly (a
+ * resumed session may not be live yet); clears the marker once all notices
+ * are appended.
  */
 function scheduleRestartConfirmation(ctx): void {
   const sessionIds = readResumeMarker()
@@ -490,33 +544,74 @@ function scheduleRestartConfirmation(ctx): void {
     return
   }
   const pending = new Set(sessionIds)
+  const attempts = new Map<string, number>()
   const interval = setInterval(() => {
-    for (const sessionId of [...pending]) {
-      let session: { append(type: 'user/message', data: unknown, opts?: unknown): unknown } | undefined
-      try {
-        session = ctx.sessions.get(sessionId)
-      } catch { /* store unavailable */ }
-      if (session === undefined) continue
-      try {
-        session.append('user/message', createUserMessage({
-          content: [{
-            type: 'text',
-            text: '已重启',
-          }],
-          // Plain user source renders like a normal message (no "plugin /
-          // form" provenance labels). This is a host-inserted notice, NOT a
-          // model turn — it never wakes the LLM, so it costs zero tokens.
-          source: { kind: 'user' },
-        }), { surfaceOp: 'append' })
-      } catch (error) {
-        try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation append failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
+    void (async () => {
+      for (const sessionId of [...pending]) {
+        let session: { header: unknown; append(type: 'assistant/message', data: unknown, opts?: unknown): unknown } | undefined
+        try {
+          session = ctx.sessions.get(sessionId)
+        } catch { /* store unavailable */ }
+        if (session === undefined) continue
+        // Stability fence: the durable file must stop changing before we
+        // write into it. A predecessor still draining its write-behind
+        // buffer (user message racing the exit) keeps appending; writing
+        // here mid-flight would interleave seq numbers on the same log.
+        let stable = true
+        try {
+          const sp = ctx.sessionPersistence
+          const location = sp !== undefined && typeof sp.locate === 'function'
+            ? sp.locate(session.header)
+            : undefined
+          if (location !== undefined && typeof location.path === 'string') {
+            const stamp = (): string | undefined => {
+              try {
+                const s = fs.statSync(location.path)
+                return `${s.size}:${s.mtimeMs}`
+              } catch { return undefined }
+            }
+            const a = stamp()
+            await new Promise((r) => setTimeout(r, 400))
+            stable = a !== undefined && a === stamp()
+          }
+        } catch { /* verification unavailable → proceed */ }
+        if (!stable) {
+          const n = (attempts.get(sessionId) ?? 0) + 1
+          attempts.set(sessionId, n)
+          if (n >= 15) {
+            pending.delete(sessionId)
+            try {
+              appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation skipped for ${sessionId}: file never stabilized\n`)
+            } catch { /* ignore */ }
+          }
+          continue
+        }
+        try {
+          session.append('assistant/message', {
+            turn: 0,
+            step: 0,
+            message: createAssistantMessage({
+              content: [{ type: 'text', text: '已重启' }],
+              // Model source: renders as an ordinary AI reply with no
+              // plugin/form provenance labels. This is a host-inserted
+              // notice, NOT a model turn — it never wakes the LLM, so it
+              // costs zero tokens.
+              source: { provider: 'dsh-restart-button', model: 'restart-confirmation' },
+            }),
+          }, { surfaceOp: 'append' })
+          try { await ctx.sessions.flush(session) } catch { /* best-effort */ }
+        } catch (error) {
+          try {
+            appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation append failed for ${sessionId}: ${String(error)}\n`)
+          } catch { /* ignore */ }
+        }
+        pending.delete(sessionId)
       }
-      pending.delete(sessionId)
-    }
-    if (pending.size === 0) {
-      clearInterval(interval)
-      clearResumeMarker()
-    }
+      if (pending.size === 0) {
+        clearInterval(interval)
+        clearResumeMarker()
+      }
+    })()
   }, 1000)
   interval.unref?.()
 }
