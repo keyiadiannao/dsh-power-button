@@ -473,8 +473,10 @@ function releasePowerTransition(): void {
  * After a restart, wait for the recorded mid-turn sessions to be resumed
  * (the client re-opens them) and inject a visible "restart complete"
  * confirmation into each — so the user/agent sees the from→to instance ids
- * WITHOUT manually querying /health. Polls the live agent registry; gives up
- * after ~60s and clears the marker.
+ * WITHOUT manually querying /health. Uses `agent.inject` (not `followup`):
+ * the notice is queued for display but does NOT wake the agent for a new
+ * LLM turn, so the confirmation costs zero tokens. Polls the live agent
+ * registry; gives up after ~60s and clears the marker.
  */
 function scheduleRestartConfirmation(ctx): void {
   const sessionIds = readResumeMarker()
@@ -492,13 +494,16 @@ function scheduleRestartConfirmation(ctx): void {
   const interval = setInterval(() => {
     attempts += 1
     for (const sessionId of [...pending]) {
-      let agent: { followup(msg: unknown): void } | undefined
+      let agent: { inject(msg: unknown): void } | undefined
       try {
         agent = ctx.agents.get(sessionId)
       } catch { /* registry unavailable */ }
       if (agent === undefined) continue
       try {
-        agent.followup(createUserMessage({
+        // `inject` (not `followup`): queues a user-visible notice WITHOUT
+        // waking the agent for a new LLM turn — a restart confirmation needs
+        // no model work, so this costs zero tokens.
+        agent.inject(createUserMessage({
           content: [{
             type: 'text',
             text: `✅ 重启完成：实例已从 ${confirmation.fromInstanceId} 重启到 ${INSTANCE_ID}。`,
@@ -506,7 +511,7 @@ function scheduleRestartConfirmation(ctx): void {
           source: { kind: 'plugin', plugin: name, form: 'instructions' },
         }))
       } catch (error) {
-        try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation followup failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
+        try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation inject failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
       }
       pending.delete(sessionId)
     }
