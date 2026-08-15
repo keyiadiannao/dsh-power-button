@@ -807,10 +807,23 @@ export function apply(ctx, config: Config) {
     ctx.commands.register({
       name: 'shutdown',
       description: en
-        ? 'Shut down DeepSeek Harness (stop process; restart manually)'
-        : '关机 DeepSeek Harness（停止进程，需手动重新启动）',
+        ? 'Shut down DeepSeek Harness (stop process; restart manually). Requires a confirm argument.'
+        : '关机 DeepSeek Harness（停止进程，需手动重新启动）。需要 confirm 参数确认。',
       recordInput: false,
-      async handler() {
+      async handler(invocation: { rawInput: string }) {
+        // Two-step confirmation for an irreversible action: `/shutdown` only
+        // explains, `/shutdown confirm` actually terminates. The rawInput is
+        // the verbatim text after the command name (kept out of the session
+        // log via recordInput: false, but still visible to the handler).
+        const arg = invocation.rawInput.trim().toLowerCase()
+        if (arg !== 'confirm' && arg !== 'yes') {
+          return {
+            kind: 'error',
+            text: en
+              ? 'Shutdown is irreversible. Type `/shutdown confirm` to proceed.'
+              : '关机不可逆。请再输入 `/shutdown confirm` 确认关机。',
+          }
+        }
         if (!claimPowerTransition('shutdown')) {
           return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
         }
