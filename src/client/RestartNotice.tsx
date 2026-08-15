@@ -102,9 +102,9 @@ const CLOSE: React.CSSProperties = {
   transition: 'color 0.15s ease, background 0.15s ease',
 }
 
-/** Fade the toast out (opacity + slight downward drift), then unmount. */
+/** Fade the toast out in place (no movement), then unmount. */
 const OUT: React.CSSProperties = {
-  animation: 'dsh-restart-toast-out 0.28s ease forwards',
+  animation: 'dsh-restart-toast-out 0.25s ease forwards',
 }
 
 /** A self-contained toast: queries /health once, renders while visible,
@@ -170,8 +170,11 @@ export function RestartNotice(props: RestartNoticeProps): JSX.Element | null {
           to   { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
         }
         @keyframes dsh-restart-toast-out {
-          from { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
-          to   { opacity: 0; transform: translateX(-50%) translateY(8px) scale(0.98); }
+          /* translateX(-50%) must persist: the wrapper's static style has no
+             transform, so centering lives entirely in these keyframes — dropping
+             it here would make the toast jump right by half its width. */
+          from { opacity: 1; transform: translateX(-50%); }
+          to   { opacity: 0; transform: translateX(-50%); }
         }
         @keyframes dsh-restart-check {
           from { stroke-dashoffset: 24; }
