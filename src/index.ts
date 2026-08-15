@@ -164,14 +164,22 @@ function portFree(p) {
 }
 
 /**
- * Shut down DSH. Returns immediately; the process exits after the response
- * flushes. Nothing relaunches — the user must start DSH again manually.
+ * Shut down DSH. Returns immediately; the process exits once the HTTP
+ * response has actually finished flushing to the socket (res 'finish'),
+ * so the client sees the ack before the connection drops — no fixed delay,
+ * no perceived hang. Nothing relaunches — the user must start DSH again
+ * manually.
  */
-function shutdownDsh() {
+function shutdownDsh(res) {
   try {
-    setTimeout(() => {
+    // Arm the exit on THIS response's 'finish' so process.exit runs right
+    // after the ack bytes leave the socket. Fallback: 500ms cap in case
+    // 'finish' never fires (e.g. client aborted mid-request).
+    const exitSoon = (): void => {
       try { process.exit(0) } catch { /* ignore */ }
-    }, 1200)
+    }
+    res.once('finish', exitSoon)
+    setTimeout(exitSoon, 500).unref()
     return { ok: true, action: 'shutdown', note: 'DeepSeek Harness 正在关机' }
   } catch (e) {
     return { ok: false, action: 'shutdown', error: e.message }
@@ -187,7 +195,7 @@ export function apply(ctx) {
       const sub = url.pathname.slice(BASE.length).replace(/\/+$/, '') || '/'
       try {
         if (sub === '/restart' && req.method === 'POST') return json(res, 200, restartDsh(ctx))
-        if (sub === '/shutdown' && req.method === 'POST') return json(res, 200, shutdownDsh())
+        if (sub === '/shutdown' && req.method === 'POST') return json(res, 200, shutdownDsh(res))
         if (sub === '/health' && req.method === 'GET') {
           return json(res, 200, { ok: true, v: createHash('sha256').update(String(Date.now())).digest('hex').slice(0, 8) })
         }

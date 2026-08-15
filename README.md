@@ -6,6 +6,8 @@
 
 个人项目,简单实现,欢迎指正。
 
+> 开发说明:本插件由 DeepSeek AI 配合 DeepSeek Harness 开发,代码经人工 review 后发布。
+
 ## 功能
 
 - **电源按钮**:注册到侧边栏底部(`sidebar.footer.action`),外观与旁边的"设置"按钮一致(34px 行高、相同边距/圆角),跟随 DSH 深浅色主题
