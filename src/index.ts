@@ -48,7 +48,7 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { z } from '@deepseek-ai/schemastery'
+import z from '@deepseek-ai/schemastery'
 
 export const name = 'dsh-restart-button'
 export const inject = ['webServer', 'tools']
