@@ -482,7 +482,7 @@ export function apply(ctx, config: Config) {
         const result = restartDsh(ctx)
         if (!result.ok) releasePowerTransition()
         return result.ok
-          ? { kind: 'text', text: result.note }
+          ? { kind: 'success', text: result.note }
           : { kind: 'error', text: result.error ?? '重启失败' }
       },
     })
@@ -497,7 +497,7 @@ export function apply(ctx, config: Config) {
         const result = shutdownDsh(ctx, undefined)
         if (!result.ok) releasePowerTransition()
         return result.ok
-          ? { kind: 'text', text: result.note }
+          ? { kind: 'success', text: result.note }
           : { kind: 'error', text: result.error ?? '关机失败' }
       },
     })
