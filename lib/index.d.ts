@@ -5,9 +5,10 @@ declare const name = "dsh-restart-button";
 declare const inject: string[];
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 interface Config {
-  /** Register the `restart_harness` model tool. Off by default: allowing the
-   * model to restart the whole harness is a higher-privilege action than the
-   * GUI power button, so it is opt-in. */
+  /** Register the `restart_harness` model tool. On by default: the owner uses
+   * this plugin with the agent, and the restart is a graceful `ctx.appExit`
+   * (tree dispose), not a hard kill. Set false to disable the model tool and
+   * keep restart exclusively on the GUI power button. */
   enableModelTool: boolean;
   /** Upper bound (ms) for the model tool's delayMs argument. */
   maxDelayMs: number;
