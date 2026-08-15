@@ -51,12 +51,31 @@ Design notes (from real issues hit in development):
 - Destructive POSTs are protected by a **same-origin / loopback guard** (CSRF).
 - An **at-most-once latch** prevents duplicate restarts from concurrent requests (a second POST gets `409`).
 - Restart success is confirmed by the **per-process `instanceId`** changing (old → new), not just a transient down.
+- The model tool's `delayMs` is **floored at 1000 ms** — the model cannot kill the process before its own turn settles — and the restart marker is **consumed (deleted) on boot** so a later ordinary launch never misreports a restart.
+- Command-line logging is **redacted** (credentials never reach `~/.dsh/restart-helper-<pid>.log`); helper/marker files are written `0600`, the runtime dir `0700`.
+
+## Restart confirmation in the transcript
+
+After a successful restart the plugin appends a `已重启` notice to the resumed
+conversation so it appears in the transcript like a normal message (product
+requirement). It is **not** a zero-token operation in the strict sense: it is
+appended to the conversation **surface** (`surfaceOp: append`), so it may
+contribute to input context on later model turns — it just never triggers an
+LLM request of its own. It also uses a synthetic `assistant/message`
+(`turn:0, step:0`), which is a compatibility measure, not an officially
+supported assistant boundary. Tracked upstream:
+[deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802)
+(downstream plugins cannot persist non-surface events); the intended final
+design is a durable, non-surface `restart/completed` event rendered by a
+client ConversationNode, which would remove it from the model surface
+entirely.
 
 ## Development
 
 ```sh
 npm run build        # tsdown: host + client bundle
 npm run typecheck    # tsc --noEmit
+npm test             # vitest: marker lifecycle, delayMs clamp, argv redaction
 ```
 
 Artifacts: host at `lib/index.js`, client bundle at `lib/client.js` (committed — git installs build-free).

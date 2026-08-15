@@ -92,7 +92,8 @@ function resumeMarkerPath(): string {
  * marker and wrongly report "restarted from A". */
 let CURRENT_PORT = 3080
 
-function markerPath(): string {
+/** Per-port marker path. Exported for tests (isolated via DSH_HOME). */
+export function markerPath(): string {
   return path.join(RUNTIME_DIR, `dsh-restart-marker-${CURRENT_PORT}.json`)
 }
 
@@ -126,15 +127,16 @@ function readMarker(): Record<string, unknown> | null {
   }
 }
 
-function writeMarker(data: Record<string, unknown>): void {
+/** Record restart intent. Exported for tests (isolated via DSH_HOME). */
+export function writeMarker(data: Record<string, unknown>): void {
   try {
     fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
     fs.writeFileSync(markerPath(), JSON.stringify(data), { encoding: 'utf8', mode: 0o600 })
   } catch { /* best-effort */ }
 }
 
-/** Whether THIS process is the freshly-restarted instance. */
-function consumeRestartConfirmation(): { fromInstanceId: string } | null {
+/** Whether THIS process is the freshly-restarted instance. Exported for tests. */
+export function consumeRestartConfirmation(): { fromInstanceId: string } | null {
   const marker = readMarker()
   if (marker === null) return null
   const oldId = marker.fromInstanceId
@@ -228,10 +230,38 @@ function appendLog(file: string, line: string): void {
   try { fs.appendFileSync(file, line, 'utf8') } catch { /* ignore */ }
 }
 
-/** Redact credential-shaped substrings from a command line before logging. */
-function redactCommandLine(parts: readonly string[]): string {
-  const REDACT = /((?:api[_-]?key|token|secret|password|passwd|auth|bearer)[=:]\s*)?[\w-]{8,}/i
-  return parts.map((p) => p.replace(REDACT, (_m, prefix) => (prefix ? `${prefix}***` : p))).join(' ')
+/**
+ * Redact credential-shaped content from a command line before logging.
+ * Handles both shapes:
+ *   --api-key=sk-xxx          (inline key=value → value redacted)
+ *   --api-key sk-xxx          (separate key token → next value redacted)
+ * Long bare tokens that look like secrets are redacted as a whole so a
+ * plugin CLI arg that passes a raw credential value cannot leak. Ordinary
+ * long words ("description", a repo path) would be over-redacted, so the
+ * bare-token rule only fires when the previous token is a credential key
+ * OR the token itself looks secret-shaped (starts with a known secret
+ * prefix such as `sk-`, `ghp_`, `xox`).
+ */
+export function redactCommandLine(parts: readonly string[]): string {
+  const KEY = /^(--?[a-z0-9_-]*)?(api[_-]?key|token|secret|password|passwd|auth|bearer)$/i
+  const INLINE = /((?:api[_-]?key|token|secret|password|passwd|auth|bearer)[=:]\s*)([\w-]{8,})/i
+  const BARE_SECRET = /^(sk-|ghp_|gho_|xox[bap]-|AKIA|-----BEGIN)[\w-]+/i
+  return parts.map((part, index) => {
+    // The value following a credential KEY token is the secret.
+    if (index > 0 && KEY.test(parts[index - 1] ?? '')) return '***'
+    return part
+      .replace(INLINE, '$1***')
+      .replace(BARE_SECRET, '***')
+  }).join(' ')
+}
+
+/** Floor/clamp the model-visible restart delay: the model must never be able
+ * to kill the process before its own tool/result and turn boundary settle. */
+export function clampModelDelayMs(raw: number, maxDelayMs: number): number {
+  const MIN_MODEL_DELAY_MS = 1000
+  return Number.isFinite(raw) && raw > 0
+    ? Math.min(Math.max(Math.floor(raw), MIN_MODEL_DELAY_MS), maxDelayMs)
+    : 2000
 }
 
 // Boot-time breadcrumb: record how THIS process was invoked so the relaunch
@@ -593,15 +623,26 @@ function scheduleRestartConfirmation(ctx): void {
           continue
         }
         try {
+          // TEMPORARY compatibility path (product requirement: the restart
+          // notice must appear in the transcript like a normal message).
+          // This appends a synthetic assistant/message to the conversation
+          // SURFACE, which means it may contribute to input context on
+          // subsequent model turns — it is NOT strictly zero-token, and
+          // turn:0/step:0 is not an officially supported assistant step
+          // boundary. Tracked upstream:
+          //   deepseek-ai/DeepSeek-Harness#802 — downstream plugins cannot
+          //   persist their own non-surface events. Once DSH supports
+          //   `ignorable` log-only events, migrate to
+          //   `restart/completed` (durable, non-surface) + a client
+          //   ConversationNodeDefinition rendering the transcript row.
           session.append('assistant/message', {
             turn: 0,
             step: 0,
             message: createAssistantMessage({
               content: [{ type: 'text', text: '已重启' }],
               // Model source: renders as an ordinary AI reply with no
-              // plugin/form provenance labels. This is a host-inserted
-              // notice, NOT a model turn — it never wakes the LLM, so it
-              // costs zero tokens.
+              // plugin/form provenance labels. Host-inserted notice, NOT a
+              // real model turn — no LLM request is issued for it.
               source: { provider: 'dsh-restart-button', model: 'restart-confirmation' },
             }),
           }, { surfaceOp: 'append' })
@@ -726,11 +767,7 @@ export function apply(ctx, config: Config) {
           // to kill the process before its own tool/result and turn boundary
           // settle. The delay is a process-control implementation detail; the
           // model only gets a bounded, floored knob.
-          const MIN_MODEL_DELAY_MS = 1000
-          const raw = Number(a.delayMs)
-          const clamped = Number.isFinite(raw) && raw > 0
-            ? Math.min(Math.max(Math.floor(raw), MIN_MODEL_DELAY_MS), cfg.maxDelayMs)
-            : 2000
+          const clamped = clampModelDelayMs(Number(a.delayMs), cfg.maxDelayMs)
           // Same at-most-once latch as the HTTP endpoints: the model tool and
           // a concurrent UI click must not spawn two helpers.
           if (!claimPowerTransition('restart')) {
