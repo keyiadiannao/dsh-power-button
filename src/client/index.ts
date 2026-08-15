@@ -21,7 +21,7 @@ export const inject = ['slots']
 export type PowerAction = 'restart' | 'shutdown'
 
 /** Global power-flow state shared between the button, menu, and overlay. */
-export type RestartPhase = 'idle' | 'shutting' | 'waiting' | 'recovering' | 'error'
+export type RestartPhase = 'idle' | 'shutting' | 'waiting' | 'recovering' | 'off' | 'error'
 
 let phase: RestartPhase = 'idle'
 let action: PowerAction = 'restart'
@@ -68,10 +68,33 @@ export function beginPower(next: PowerAction): void {
     })
     .catch(() => { /* restart: the polls observe the outage; shutdown: nothing more to do */ })
 
-  // Shutdown: the process exits and never comes back — no polling, no
-  // reload. The overlay just sits on the final caption until the connection
-  // drops.
-  if (next === 'shutdown') return
+  // Shutdown: the process exits and never comes back. Poll health until we
+  // observe the DOWN (connection refused — the process is gone), then settle
+  // on the final "已关机" screen. No reload: the page must not bounce back
+  // to a dead server; it just tells the user it is safe to close.
+  if (next === 'shutdown') {
+    let attempts = 0
+    const timer = setInterval(async () => {
+      attempts += 1
+      if (attempts >= 40) { // ~40s cap; give up and show the final screen anyway
+        clearInterval(timer)
+        phase = 'off'
+        emit()
+        return
+      }
+      let up = false
+      try {
+        const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
+        up = r.ok
+      } catch { up = false }
+      if (!up) {
+        clearInterval(timer)
+        phase = 'off'
+        emit()
+      }
+    }, 500)
+    return
+  }
 
   // Brief beat on the closing caption, then move to waiting.
   setTimeout(() => {

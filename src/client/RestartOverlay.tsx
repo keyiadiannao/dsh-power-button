@@ -157,6 +157,7 @@ export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null 
     shutting: 0.22,
     waiting: 0.58,
     recovering: 1,
+    off: 1,
     error: 0.9,
   }
   const progress = progressByPhase[phase] ?? 0
@@ -177,6 +178,7 @@ export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null 
         shutting: '正在关机 DeepSeek Harness…',
         waiting: '正在关机…',
         recovering: '正在恢复…',
+        off: '已关机',
         error: '关机出现问题',
       }
     : {
@@ -191,6 +193,7 @@ export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null 
         shutting: '正在结束进程，即将断开连接',
         waiting: '等待进程退出',
         recovering: '正在恢复…',
+        off: '可以关闭此页面了；需要时请手动重新启动 DSH',
         error: error ?? '未知错误',
       }
     : {
