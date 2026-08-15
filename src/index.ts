@@ -128,8 +128,8 @@ function readMarker(): Record<string, unknown> | null {
 
 function writeMarker(data: Record<string, unknown>): void {
   try {
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true })
-    fs.writeFileSync(markerPath(), JSON.stringify(data), 'utf8')
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
+    fs.writeFileSync(markerPath(), JSON.stringify(data), { encoding: 'utf8', mode: 0o600 })
   } catch { /* best-effort */ }
 }
 
@@ -143,7 +143,11 @@ function consumeRestartConfirmation(): { fromInstanceId: string } | null {
     try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
     return null
   }
-  // This is a NEW process that was launched by the restart helper.
+  // This is a NEW process launched by the restart helper. Consume the
+  // marker NOW so a LATER ordinary boot of this profile cannot mistake
+  // itself for the restarted instance: B restarts from A, exits normally,
+  // then a manual C boot must NOT report "restarted from A".
+  try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
   return { fromInstanceId: oldId }
 }
 
@@ -166,8 +170,8 @@ function runningSessionIds(ctx): string[] {
 
 function writeResumeMarker(sessionIds: string[]): void {
   try {
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true })
-    fs.writeFileSync(resumeMarkerPath(), JSON.stringify({ sessionIds, at: new Date().toISOString() }), 'utf8')
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
+    fs.writeFileSync(resumeMarkerPath(), JSON.stringify({ sessionIds, at: new Date().toISOString() }), { encoding: 'utf8', mode: 0o600 })
   } catch { /* best-effort */ }
 }
 
@@ -231,11 +235,13 @@ function redactCommandLine(parts: readonly string[]): string {
 }
 
 // Boot-time breadcrumb: record how THIS process was invoked so the relaunch
-// derivation can be verified against reality (execArgv vs argv split).
+// derivation can be verified against reality (execArgv vs argv split). The
+// command line can carry credentials, so every part goes through the
+// redactor before it touches the log.
 try {
-  fs.mkdirSync(RUNTIME_DIR, { recursive: true })
+  fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
   appendLog(LOG_FILE,
-    `${new Date().toISOString()} loaded execArgv=${JSON.stringify(process.execArgv)} argv=${JSON.stringify(process.argv)} cwd=${process.cwd()}\n`)
+    `${new Date().toISOString()} loaded execArgv=${redactCommandLine(process.execArgv)} argv=${redactCommandLine(process.argv)} cwd=${process.cwd()}\n`)
 } catch { /* ignore */ }
 
 /**
@@ -342,22 +348,22 @@ function portFree(p) {
   function cleanup() { try { fs.unlinkSync(__filename); } catch {} }
 })();
 `
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true })
-    fs.writeFileSync(HELPER_FILE, helperScript, 'utf8')
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
+    // 0600: the helper embeds the full relaunch argv, which can carry
+    // credentials (e.g. --api-key in a plugin CLI arg).
+    fs.writeFileSync(HELPER_FILE, helperScript, { encoding: 'utf8', mode: 0o600 })
     const helper = spawn(process.execPath, [HELPER_FILE], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
     })
     helper.unref()
-    // Flush every live session BEFORE the exit timer starts: the write-behind
-    // buffer must be durably on disk before the helper respawns the new
-    // instance. A user message arriving during the exit window would
-    // otherwise still be buffered here when the new process reads the log —
-    // the two writers then interleave seq numbers on the same file (the
-    // corruption seen when a message races a restart). The dispose walk
-    // flushes again as a backstop; this makes the restart decision point the
-    // durability barrier.
+    // Best-effort pre-exit durability checkpoint: flush every live session
+    // before the exit timer starts so the visible write-behind window is
+    // small. Events appended after this point (e.g. this tool's own
+    // tool/result, or a message landing during the delay) are covered by
+    // Harness's `ctx.appExit` disposal final drain on session/disposed —
+    // that teardown lifecycle, not this flush, is the durability authority.
     const scheduleExit = (): void => {
       // Schedule the old process to exit AFTER the HTTP response flushes.
       // Prefer DSH's `ctx.appExit` (graceful tree dispose); fall back to
@@ -716,9 +722,14 @@ export function apply(ctx, config: Config) {
         },
         async execute(args) {
           const a = (args ?? {}) as { delayMs?: number }
+          // Floor the model-visible delay: the restart tool must never be able
+          // to kill the process before its own tool/result and turn boundary
+          // settle. The delay is a process-control implementation detail; the
+          // model only gets a bounded, floored knob.
+          const MIN_MODEL_DELAY_MS = 1000
           const raw = Number(a.delayMs)
           const clamped = Number.isFinite(raw) && raw > 0
-            ? Math.min(Math.floor(raw), cfg.maxDelayMs)
+            ? Math.min(Math.max(Math.floor(raw), MIN_MODEL_DELAY_MS), cfg.maxDelayMs)
             : 2000
           // Same at-most-once latch as the HTTP endpoints: the model tool and
           // a concurrent UI click must not spawn two helpers.
