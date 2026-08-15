@@ -348,7 +348,7 @@ function portFree(p) {
         try { process.exit(0) } catch { /* ignore */ }
       }
     }, delayMs)
-    return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启，约 10 秒后恢复' }
+    return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启' }
   } catch (e) {
     return { ok: false, action: 'restart', error: e.message }
   }
