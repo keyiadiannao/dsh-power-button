@@ -49,9 +49,14 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools', 'commands']
+export const inject = ['webServer', 'tools', 'commands', 'agents']
+
+/** Sessions that were mid-turn at restart time: recorded so the new instance
+ * can auto-confirm the restart in the resumed conversation. */
+const RESUME_MARKER_FILE = path.join(RUNTIME_DIR, 'dsh-restart-resume.json')
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -133,6 +138,39 @@ function consumeRestartConfirmation(): { fromInstanceId: string } | null {
   return { fromInstanceId: oldId }
 }
 
+/** Session ids that were mid-turn (running) at restart time. */
+function runningSessionIds(ctx): string[] {
+  try {
+    return [...new Set(
+      ctx.agents.roots()
+        .filter((agent: { status?: string }) => agent.status === 'running')
+        .map((agent: { id: unknown }) => String(agent.id)),
+    )]
+  } catch {
+    return []
+  }
+}
+
+function writeResumeMarker(sessionIds: string[]): void {
+  try {
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true })
+    fs.writeFileSync(RESUME_MARKER_FILE, JSON.stringify({ sessionIds, at: new Date().toISOString() }), 'utf8')
+  } catch { /* best-effort */ }
+}
+
+function readResumeMarker(): string[] {
+  try {
+    const j = JSON.parse(fs.readFileSync(RESUME_MARKER_FILE, 'utf8')) as { sessionIds?: string[] }
+    return Array.isArray(j.sessionIds) ? j.sessionIds : []
+  } catch {
+    return []
+  }
+}
+
+function clearResumeMarker(): void {
+  try { fs.unlinkSync(RESUME_MARKER_FILE) } catch { /* already gone */ }
+}
+
 /**
  * Resolve the port the current web server listens on. Prefer the actual
  * `--port` argument (the CLI accepts `--port 0` for an OS-assigned port, in
@@ -197,6 +235,9 @@ function restartDsh(ctx, delayMs = 1500) {
     // Record restart intent: the new process reads this to confirm it IS the
     // restarted instance (its own instanceId differs from the recorded old).
     writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
+    // Record mid-turn sessions so the new instance can auto-confirm the
+    // restart in the resumed conversation.
+    writeResumeMarker(runningSessionIds(ctx))
     // Replay the CURRENT invocation, portably (no hard-coded paths):
     // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
     // script + app args. Spawned children inherit env, so any NODE_OPTIONS
@@ -419,6 +460,54 @@ function releasePowerTransition(): void {
   powerTransition = null
 }
 
+/**
+ * After a restart, wait for the recorded mid-turn sessions to be resumed
+ * (the client re-opens them) and inject a visible "restart complete"
+ * confirmation into each — so the user/agent sees the from→to instance ids
+ * WITHOUT manually querying /health. Polls the live agent registry; gives up
+ * after ~60s and clears the marker.
+ */
+function scheduleRestartConfirmation(ctx): void {
+  const sessionIds = readResumeMarker()
+  if (sessionIds.length === 0) {
+    clearResumeMarker()
+    return
+  }
+  const confirmation = restartConfirmation
+  if (confirmation === null) {
+    clearResumeMarker()
+    return
+  }
+  const pending = new Set(sessionIds)
+  let attempts = 0
+  const interval = setInterval(() => {
+    attempts += 1
+    for (const sessionId of [...pending]) {
+      let agent: { followup(msg: unknown): void } | undefined
+      try {
+        agent = ctx.agents.get(sessionId)
+      } catch { /* registry unavailable */ }
+      if (agent === undefined) continue
+      try {
+        agent.followup(createUserMessage({
+          content: [{
+            type: 'text',
+            text: `✅ 重启完成：实例已从 ${confirmation.fromInstanceId} 重启到 ${INSTANCE_ID}。`,
+          }],
+          source: { kind: 'plugin', plugin: name, form: 'instructions' },
+        }))
+      } catch (error) {
+        try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation followup failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
+      }
+      pending.delete(sessionId)
+    }
+    if (pending.size === 0 || attempts >= 120) { // ~60s cap
+      clearInterval(interval)
+      clearResumeMarker()
+    }
+  }, 500)
+}
+
 export function apply(ctx, config: Config) {
   // If the restart marker names a DIFFERENT previous instance, this process
   // is the freshly-relaunched one — record it for /health confirmation.
@@ -427,6 +516,11 @@ export function apply(ctx, config: Config) {
     try {
       appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${restartConfirmation.fromInstanceId} thisInstanceId=${INSTANCE_ID}\n`)
     } catch { /* ignore */ }
+    // Auto-confirm in the resumed conversation: once the recorded sessions'
+    // agents come back live after the client reopens them, inject a visible
+    // "restart complete" message (with the from→to instance ids) so the user
+    // or agent does NOT need to query /health manually.
+    scheduleRestartConfirmation(ctx)
   }
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
