@@ -633,6 +633,22 @@ export function apply(ctx, config: Config) {
     // or agent does NOT need to query /health manually.
     scheduleRestartConfirmation(ctx)
   }
+  // Interrupt-boundary durability insurance, independent of the upstream
+  // fix in dsh-agent-loop: when a turn is aborted (user stop / interrupt),
+  // the step/end + turn/end boundary can sit in the 200ms write-behind
+  // buffer. If the session is resumed before that timer fires, a fresh
+  // Session built from the stale disk prefix collides on the same seq
+  // (duplicate seqs → corrupted log). Flush on the interrupted boundary so
+  // the durable log converges before any reload. Complements the upstream
+  // fix and protects DSH versions without it.
+  // (See deepseek-ai/DeepSeek-Harness discussion #483 — write-behind
+  // batching races the un-flushed tail.)
+  ctx.on('session/event', (session, event) => {
+    if (event?.type === 'turn/end' && event.data?.reason?.kind === 'aborted') {
+      try { void ctx.sessions.flush(session) } catch { /* best-effort */ }
+    }
+  })
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: BASE,
