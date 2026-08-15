@@ -52,7 +52,7 @@ import z from '@deepseek-ai/schemastery'
 import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools', 'commands', 'agents', 'sessions', 'sessionPersistence']
+export const inject = ['webServer', 'tools', 'commands', 'agents', 'sessions', 'sessionPersistence', 'settings']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -583,6 +583,18 @@ function releasePowerTransition(): void {
  * resumed session may not be live yet); clears the marker once all notices
  * are appended.
  */
+/** The restart confirmation text, matched to the UI language (DSH settings
+ * `locale.preference`: 'zh' | 'en' | …). Falls back to Chinese when the
+ * settings service is unavailable or the preference is unknown. */
+function restartConfirmationText(ctx): string {
+  try {
+    const locale = ctx.settings?.get?.('locale') as { preference?: string } | undefined
+    const pref = typeof locale?.preference === 'string' ? locale.preference.toLowerCase() : ''
+    if (pref.startsWith('en')) return 'Restarted'
+  } catch { /* settings unavailable */ }
+  return '已重启'
+}
+
 function scheduleRestartConfirmation(ctx): void {
   const sessionIds = readResumeMarker()
   if (sessionIds.length === 0) {
@@ -654,7 +666,7 @@ function scheduleRestartConfirmation(ctx): void {
             turn: 0,
             step: 0,
             message: createAssistantMessage({
-              content: [{ type: 'text', text: '已重启' }],
+              content: [{ type: 'text', text: restartConfirmationText(ctx) }],
               // Model source: renders as an ordinary AI reply with no
               // plugin/form provenance labels. Host-inserted notice, NOT a
               // real model turn — no LLM request is issued for it.
