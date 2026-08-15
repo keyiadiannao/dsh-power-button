@@ -85,11 +85,53 @@ const RUNTIME_DIR = dshHome()
  * than "saw a down, then an up" — works even if the down was missed). */
 const INSTANCE_ID = randomUUID()
 
+/** Set at apply time when this process is the freshly-restarted instance:
+ * health reports `restarted: true, fromInstanceId: <old>` so a /restart
+ * command, the model tool, or a UI click can be confirmed after the fact. */
+let restartConfirmation: { fromInstanceId: string } | null = null
+
 /** Unique helper file + per-pid log so concurrent DSH instances (e.g. a
  * profile on :3080 and the test copy on :3081) cannot overwrite each other's
  * restart helper, and logs are attributable per instance. */
 const HELPER_FILE = path.join(RUNTIME_DIR, `dsh-restart-helper-${process.pid}-${Date.now()}.cjs`)
 const LOG_FILE = path.join(RUNTIME_DIR, `restart-helper-${process.pid}.log`)
+
+/** Restart marker: durable evidence that a restart happened and the current
+ * process is the NEW instance. Written by restartDsh (intent), updated by the
+ * helper (relaunch confirmation), read by the new process at apply time.
+ * Lets a /restart command, the model tool, or a UI click answer the question
+ * "did it really restart?" — the new instance reports
+ * `restarted: true, fromInstanceId: <old>` on /health. */
+const MARKER_FILE = path.join(RUNTIME_DIR, 'dsh-restart-marker.json')
+
+function readMarker(): Record<string, unknown> | null {
+  try {
+    return JSON.parse(fs.readFileSync(MARKER_FILE, 'utf8')) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+function writeMarker(data: Record<string, unknown>): void {
+  try {
+    fs.mkdirSync(RUNTIME_DIR, { recursive: true })
+    fs.writeFileSync(MARKER_FILE, JSON.stringify(data), 'utf8')
+  } catch { /* best-effort */ }
+}
+
+/** Whether THIS process is the freshly-restarted instance. */
+function consumeRestartConfirmation(): { fromInstanceId: string } | null {
+  const marker = readMarker()
+  if (marker === null) return null
+  const oldId = marker.fromInstanceId
+  if (typeof oldId !== 'string' || oldId === INSTANCE_ID) {
+    // Stale or self-referential marker: clear it and report nothing.
+    try { fs.unlinkSync(MARKER_FILE) } catch { /* ignore */ }
+    return null
+  }
+  // This is a NEW process that was launched by the restart helper.
+  return { fromInstanceId: oldId }
+}
 
 /**
  * Resolve the port the current web server listens on. Prefer the actual
@@ -152,6 +194,9 @@ try {
 function restartDsh(ctx, delayMs = 1500) {
   try {
     const port = resolvePort(ctx)
+    // Record restart intent: the new process reads this to confirm it IS the
+    // restarted instance (its own instanceId differs from the recorded old).
+    writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
     // Replay the CURRENT invocation, portably (no hard-coded paths):
     // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
     // script + app args. Spawned children inherit env, so any NODE_OPTIONS
@@ -167,6 +212,8 @@ const relaunch = ${relaunch};
 const cwd = ${JSON.stringify(cwd)};
 const PORT = ${port};
 const OLD_PID = ${process.pid};
+const OLD_INSTANCE = ${JSON.stringify(INSTANCE_ID)};
+const MARKER = ${JSON.stringify(MARKER_FILE)};
 const LOG = ${JSON.stringify(LOG_FILE)};
 const SERVER_LOG = ${JSON.stringify(serverLog)};
 function log(m) {
@@ -220,6 +267,16 @@ function portFree(p) {
     if (spawned) {
       child.unref();
       log('spawned pid ' + child.pid + ' (attempt ' + attempt + ')');
+      // Confirm the relaunch in the marker so the new process can prove it
+      // is the restarted instance.
+      try {
+        fs.writeFileSync(MARKER, JSON.stringify({
+          fromInstanceId: OLD_INSTANCE,
+          requestedAt: new Date().toISOString(),
+          newPid: child.pid,
+          relaunchedAt: new Date().toISOString(),
+        }), 'utf8');
+      } catch {}
       cleanup();
     } else {
       log('spawn error on attempt ' + attempt + ', retrying in ' + (attempt * 800) + 'ms');
@@ -363,6 +420,14 @@ function releasePowerTransition(): void {
 }
 
 export function apply(ctx, config: Config) {
+  // If the restart marker names a DIFFERENT previous instance, this process
+  // is the freshly-relaunched one — record it for /health confirmation.
+  restartConfirmation = consumeRestartConfirmation()
+  if (restartConfirmation !== null) {
+    try {
+      appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${restartConfirmation.fromInstanceId} thisInstanceId=${INSTANCE_ID}\n`)
+    } catch { /* ignore */ }
+  }
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: BASE,
@@ -392,7 +457,12 @@ export function apply(ctx, config: Config) {
           return json(res, result.ok ? 200 : 500, result)
         }
         if (sub === '/health' && req.method === 'GET') {
-          return json(res, 200, { ok: true, instanceId: INSTANCE_ID })
+          const body: Record<string, unknown> = { ok: true, instanceId: INSTANCE_ID }
+          if (restartConfirmation !== null) {
+            body.restarted = true
+            body.fromInstanceId = restartConfirmation.fromInstanceId
+          }
+          return json(res, 200, body)
         }
         json(res, 404, { ok: false, error: `no dsh-restart-button endpoint ${sub}` })
       } catch (e) {
