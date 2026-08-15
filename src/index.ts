@@ -55,9 +55,10 @@ export const inject = ['webServer', 'tools']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
-  /** Register the `restart_harness` model tool. Off by default: allowing the
-   * model to restart the whole harness is a higher-privilege action than the
-   * GUI power button, so it is opt-in. */
+  /** Register the `restart_harness` model tool. On by default: the owner uses
+   * this plugin with the agent, and the restart is a graceful `ctx.appExit`
+   * (tree dispose), not a hard kill. Set false to disable the model tool and
+   * keep restart exclusively on the GUI power button. */
   enableModelTool: boolean
   /** Upper bound (ms) for the model tool's delayMs argument. */
   maxDelayMs: number
@@ -65,7 +66,7 @@ export interface Config {
 
 /** Schemastery schema; cordis validates and provides it as apply(ctx, config). */
 export const Config: z<Config> = z.object({
-  enableModelTool: z.boolean().default(false),
+  enableModelTool: z.boolean().default(true),
   maxDelayMs: z.number().default(5000),
 })
 
@@ -393,10 +394,10 @@ export function apply(ctx, config: Config) {
   }), 'dsh-restart-button: http routes')
 
   // Model tool: same name as anweat/dsh-restart's `restart_harness` so this
-  // plugin stands in for it. Off by default (config.enableModelTool) —
-  // letting the model restart the whole harness is a higher-privilege action
-  // than the GUI button, so it is opt-in. Skip silently when another plugin
-  // already owns the name (both installed) — the first registrant wins.
+  // plugin stands in for it. On by default (config.enableModelTool); set
+  // false to keep restart exclusively on the GUI button. Skip silently when
+  // another plugin already owns the name (both installed) — the first
+  // registrant wins.
   const cfg = config
   if (cfg.enableModelTool) {
     try {
