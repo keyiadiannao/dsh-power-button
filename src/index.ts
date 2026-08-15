@@ -50,7 +50,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools']
+export const inject = ['webServer', 'tools', 'config']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
