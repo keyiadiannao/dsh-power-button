@@ -809,6 +809,11 @@ export function apply(ctx, config: Config) {
       description: en
         ? 'Shut down DeepSeek Harness (stop process; restart manually). Requires a confirm argument.'
         : '关机 DeepSeek Harness（停止进程，需手动重新启动）。需要 confirm 参数确认。',
+      // The confirm argument makes /shutdown a command WITH input: without
+      // this descriptor the UI's slash matchEnter treats a bare /shutdown as
+      // a command but `/shutdown confirm` (an argued line) as a non-command
+      // and hands it to the model instead of the handler.
+      input: { hint: en ? 'confirm — irreversible shutdown' : 'confirm —— 不可逆关机' },
       recordInput: false,
       async handler(invocation: { rawInput: string }) {
         // Two-step confirmation for an irreversible action: `/shutdown` only
