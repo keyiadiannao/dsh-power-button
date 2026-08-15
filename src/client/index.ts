@@ -70,21 +70,6 @@ function fail(msg: string): void {
  * overwriting a newer flow's phase (e.g. error → waiting on retry). */
 let operationId = 0
 
-/** The instanceId of the DSH process this page loaded against. A restart is
- * confirmed when health later reports a DIFFERENT id (new process), even if
- * the brief down window was never observed. */
-let baselineInstanceId: string | null = null
-
-/** Capture the current process's instanceId once at plugin load. */
-async function captureInstanceId(): Promise<void> {
-  try {
-    const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
-    if (!r.ok) return
-    const j = await r.json().catch(() => ({})) as { instanceId?: string }
-    if (typeof j.instanceId === 'string') baselineInstanceId = j.instanceId
-  } catch { /* offline at load; seenDown fallback covers it */ }
-}
-
 /** Kick a restart or shutdown. Opens the overlay and drives the flow. */
 export function beginPower(next: PowerAction): void {
   const myOperation = ++operationId
@@ -96,30 +81,25 @@ export function beginPower(next: PowerAction): void {
 
   const endpoint = next === 'shutdown' ? '/api/dsh-restart-button/shutdown' : '/api/dsh-restart-button/restart'
 
-  // Fire-and-forget with `keepalive`: keepalive helps the power request
-  // survive page/document lifecycle changes (e.g. the old instance exiting).
-  // Do NOT rely on it as a guarantee of a separate HTTP connection pool.
-  // The overlay flow is driven entirely by the health polls below, never by
-  // this POST's response.
-  void fetch(endpoint, { method: 'POST', keepalive: true })
-    .then(async (r) => {
-      const j = await r.json().catch(() => ({}))
-      if (!active()) return // stale operation; a newer flow owns the state
-      if (!r.ok || (j as { ok?: boolean })?.ok === false) {
-        fail((j as { error?: string })?.error ?? tl('opFailedHttp').replace('{0}', String(r.status)))
-      }
-    })
-    .catch(() => { /* restart: the polls observe the outage; shutdown: nothing more to do */ })
-
-  // Shutdown: the process exits and never comes back. Poll health until we
-  // observe the DOWN (connection refused — the process is gone), then settle
-  // on the final "已关机" screen. No reload: the page must not bounce back
-  // to a dead server; it just tells the user it is safe to close.
+  // Shutdown: fire-and-forget the POST (keepalive survives the page/process
+  // lifecycle), then poll health. The process exits and never comes back —
+  // once we observe repeated DOWNs, settle on the final "已关机" screen. No
+  // reload: the page must not bounce back to a dead server.
   if (next === 'shutdown') {
+    void fetch(endpoint, { method: 'POST', keepalive: true })
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}))
+        if (!active()) return
+        if (!r.ok || (j as { ok?: boolean })?.ok === false) {
+          fail((j as { error?: string })?.error ?? tl('opFailedHttp').replace('{0}', String(r.status)))
+        }
+      })
+      .catch(() => { /* polls observe the outage */ })
     const SHUTDOWN_POLL_MS = 500
     const SHUTDOWN_TIMEOUT_MS = 40_000
     const MAX_ATTEMPTS = SHUTDOWN_TIMEOUT_MS / SHUTDOWN_POLL_MS
     let attempts = 0
+    let downStreak = 0
     const timer = setInterval(async () => {
       if (!active()) { clearInterval(timer); return }
       attempts += 1
@@ -138,9 +118,16 @@ export function beginPower(next: PowerAction): void {
         up = r.ok
       } catch { up = false }
       if (!up) {
-        clearInterval(timer)
-        phase = 'off'
-        emit()
+        // Require a short streak of DOWNs (a single transient blip must not
+        // declare "已关机").
+        downStreak += 1
+        if (downStreak >= 3) {
+          clearInterval(timer)
+          phase = 'off'
+          emit()
+        }
+      } else {
+        downStreak = 0
       }
     }, SHUTDOWN_POLL_MS)
     return
@@ -155,68 +142,100 @@ export function beginPower(next: PowerAction): void {
     }
   }, 600)
 
-  // Restart: poll health from the START. Success is confirmed by EITHER:
-  //   (a) observing a real DOWN (connection refused — old process gone), or
-  //   (b) the per-process instanceId changing (old A → new B), which works
-  //       even if the brief down window was missed.
-  let seenDown = false
-  let upTicks = 0
-  let attempts = 0
-  const timer = setInterval(async () => {
-    if (!active()) { clearInterval(timer); return }
-    attempts += 1
-    if (attempts >= 90) { // ~90s cap: went down but never came back
-      clearInterval(timer)
-      phase = 'error'
-      errorMsg = tl('restartTimeout')
-      emit()
-      return
-    }
-    let up = false
-    let instanceChanged = false
+  // Restart: capture THIS operation's baseline instanceId FIRST (not the
+  // page-load one — the server may have been restarted manually since, which
+  // would make the old baseline a false "already changed"), then POST, then
+  // poll. Success is authoritative when the instanceId changes from the
+  // operation baseline (old A → new B). A captured baseline makes seenDown
+  // alone insufficient (a transient network blip on the still-old instance
+  // must not fake success); seenDown is only the fallback when NO baseline
+  // could be captured at all.
+  void (async () => {
+    let baseline: string | null = null
     try {
       const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
-      up = r.ok
       if (r.ok) {
         const j = await r.json().catch(() => ({})) as { instanceId?: string }
-        instanceChanged = baselineInstanceId !== null
-          && typeof j.instanceId === 'string'
-          && j.instanceId !== baselineInstanceId
+        if (typeof j.instanceId === 'string') baseline = j.instanceId
       }
-    } catch { up = false }
+    } catch { /* baseline stays null → seenDown fallback */ }
 
-    if (!up) {
-      seenDown = true
-      upTicks = 0
-      if (phase !== 'waiting') {
-        phase = 'waiting'
+    if (!active()) return
+
+    // Fire the restart POST now that the baseline is captured.
+    void fetch('/api/dsh-restart-button/restart', { method: 'POST', keepalive: true })
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}))
+        if (!active()) return
+        if (!r.ok || (j as { ok?: boolean })?.ok === false) {
+          fail((j as { error?: string })?.error ?? tl('opFailedHttp').replace('{0}', String(r.status)))
+        }
+      })
+      .catch(() => { /* polls observe the outage */ })
+
+    // Serial (single-flight) polling: each round awaits the fetch before the
+    // next timer is scheduled, so overlapping polls cannot race the state.
+    let seenDown = false
+    let upTicks = 0
+    let attempts = 0
+    const POLL_MS = 1000
+    const MAX_ATTEMPTS = 90
+
+    const poll = async (): Promise<void> => {
+      if (!active()) return
+      attempts += 1
+      if (attempts > MAX_ATTEMPTS) {
+        phase = 'error'
+        errorMsg = tl('restartTimeout')
         emit()
+        return
       }
-      return
-    }
+      let up = false
+      let instanceChanged = false
+      try {
+        const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
+        up = r.ok
+        if (r.ok) {
+          const j = await r.json().catch(() => ({})) as { instanceId?: string }
+          instanceChanged = baseline !== null
+            && typeof j.instanceId === 'string'
+            && j.instanceId !== baseline
+        }
+      } catch { up = false }
+      if (!active()) return
 
-    // Server is up again: confirmed restart if we saw a down OR the instance
-    // id changed (new process answered).
-    if (seenDown || instanceChanged) {
-      clearInterval(timer)
-      phase = 'recovering'
-      emit()
-      // Let the ring transition to 100% (1.1s) before reloading.
-      setTimeout(() => { if (active()) window.location.reload() }, 1300)
-      return
+      if (!up) {
+        seenDown = true
+        upTicks = 0
+        if (phase !== 'waiting') {
+          phase = 'waiting'
+          emit()
+        }
+      } else {
+        const confirmed = baseline !== null
+          ? instanceChanged // authoritative: a different process answered
+          : (seenDown && up) // fallback: real down followed by an up
+        if (confirmed) {
+          phase = 'recovering'
+          emit()
+          // Let the ring transition to 100% (1.1s) before reloading.
+          setTimeout(() => { if (active()) window.location.reload() }, 1300)
+          return
+        }
+        // Up without confirmation: allow ~20s for the POST to be delivered
+        // (it can queue behind the app's streams) before declaring failure.
+        upTicks += 1
+        if (upTicks >= 20) {
+          phase = 'error'
+          errorMsg = tl('restartNoEffect')
+          emit()
+          return
+        }
+      }
+      setTimeout(poll, POLL_MS)
     }
-
-    // Up without ever going down: the restart hasn't taken effect. Allow
-    // ~20s for the POST to be delivered (it can queue behind the app's
-    // streams) and the old process to exit before declaring failure.
-    upTicks += 1
-    if (upTicks >= 20) {
-      clearInterval(timer)
-      phase = 'error'
-      errorMsg = tl('restartNoEffect')
-      emit()
-    }
-  }, 1000)
+    void poll()
+  })()
 }
 
 /** Dismiss the error overlay without reloading: cancels any in-flight flow
@@ -242,10 +261,6 @@ export function apply(ctx: ClientContext): void {
 
   // Capture the locale service for module-scope (non-component) error strings.
   localeSvc = ctx.locale
-
-  // Record the current process's instanceId; restart success compares against
-  // it (new process → different id).
-  void captureInstanceId()
 
   // Self-contained layout fix: this plugin's footer button is full-width
   // (width: calc(100% + 8px)), so it needs the sidebar's footer-actions

@@ -71,7 +71,14 @@ function resolveConfig(ctx): Config {
 }
 
 const BASE = '/api/dsh-restart-button'
-const RUNTIME_DIR = path.join(os.homedir(), '.dsh')
+
+/** DSH home per the official contract: explicit $DSH_HOME, else ~/.dsh. */
+function dshHome(): string {
+  const env = process.env.DSH_HOME?.trim()
+  if (env !== undefined && env !== '') return path.resolve(env)
+  return path.join(os.homedir(), '.dsh')
+}
+const RUNTIME_DIR = dshHome()
 
 /** Per-process identity: fixed for this instance's lifetime. The client can
  * compare it across a restart to confirm a NEW process answered (stronger
@@ -113,11 +120,28 @@ function json(res, status, payload) {
   res.end(JSON.stringify(payload))
 }
 
+/** Append to a log file, rotating (truncating) once it exceeds 1MB so an
+ * 长期运行的实例不会无限增长。Best-effort: never throws. */
+const LOG_MAX_BYTES = 1024 * 1024
+function appendLog(file: string, line: string): void {
+  try {
+    const { size } = fs.statSync(file)
+    if (size > LOG_MAX_BYTES) fs.writeFileSync(file, '', 'utf8')
+  } catch { /* first write or missing file */ }
+  try { fs.appendFileSync(file, line, 'utf8') } catch { /* ignore */ }
+}
+
+/** Redact credential-shaped substrings from a command line before logging. */
+function redactCommandLine(parts: readonly string[]): string {
+  const REDACT = /((?:api[_-]?key|token|secret|password|passwd|auth|bearer)[=:]\s*)?[\w-]{8,}/i
+  return parts.map((p) => p.replace(REDACT, (_m, prefix) => (prefix ? `${prefix}***` : p))).join(' ')
+}
+
 // Boot-time breadcrumb: record how THIS process was invoked so the relaunch
 // derivation can be verified against reality (execArgv vs argv split).
 try {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true })
-  fs.appendFileSync(LOG_FILE,
+  appendLog(LOG_FILE,
     `${new Date().toISOString()} loaded execArgv=${JSON.stringify(process.execArgv)} argv=${JSON.stringify(process.argv)} cwd=${process.cwd()}\n`)
 } catch { /* ignore */ }
 
@@ -174,14 +198,36 @@ function portFree(p) {
   }
   if (!freed) { log('port never freed - giving up'); cleanup(); return; }
   await new Promise((r) => setTimeout(r, 500)); // settle: let the socket fully release
-  log('relaunching: ' + relaunch.join(' '));
+  log('relaunching: ' + relaunch.join(' ').replace(/((?:api[_-]?key|token|secret|password|auth)=?)[^\s]+/ig, '$1***'));
   const out = fs.openSync(SERVER_LOG, 'a');
-  const child = spawn(relaunch[0], relaunch.slice(1), {
-    cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
-  });
-  child.unref();
-  log('spawned pid ' + child.pid);
-  cleanup();
+  // spawn() reports many failures asynchronously ('error'), not synchronously;
+  // wait for 'spawn' to confirm the new process is actually up, retry with
+  // short backoff, and only then clean up the helper.
+  const RELAUNCH_RETRIES = 3;
+  async function tryRelaunch(attempt) {
+    if (attempt > RELAUNCH_RETRIES) {
+      log('relaunch failed after ' + RELAUNCH_RETRIES + ' attempts - giving up');
+      cleanup();
+      return;
+    }
+    const child = spawn(relaunch[0], relaunch.slice(1), {
+      cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+    });
+    const spawned = await new Promise((resolve) => {
+      child.once('spawn', () => resolve(true));
+      child.once('error', () => resolve(false));
+    });
+    if (spawned) {
+      child.unref();
+      log('spawned pid ' + child.pid + ' (attempt ' + attempt + ')');
+      cleanup();
+    } else {
+      log('spawn error on attempt ' + attempt + ', retrying in ' + (attempt * 800) + 'ms');
+      await new Promise((r) => setTimeout(r, attempt * 800));
+      tryRelaunch(attempt + 1);
+    }
+  }
+  await tryRelaunch(1);
   function cleanup() { try { fs.unlinkSync(__filename); } catch {} }
 })();
 `
@@ -362,7 +408,7 @@ export function apply(ctx) {
           + '由 dsh-restart-button 提供（独立实现）：派生一个 detach 的 helper，'
           + '在旧进程退出并释放端口后以原命令行在原目录重新拉起，然后旧进程退出。'
           + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
-          + '返回旧进程 pid、cwd、命令行与日志文件路径。',
+          + '返回 ok 与说明文本。',
         parameters: {
           type: 'object',
           properties: {
@@ -404,7 +450,7 @@ export function apply(ctx) {
       // endpoints remain, the model uses theirs. Not an error.
       if (String(error).includes('already registered')) {
         try {
-          fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} restart_harness already registered by another plugin; skipping our tool\n`)
+          appendLog(LOG_FILE, `${new Date().toISOString()} restart_harness already registered by another plugin; skipping our tool\n`)
         } catch { /* ignore */ }
       } else {
         throw error
