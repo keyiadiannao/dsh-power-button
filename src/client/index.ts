@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { RestartButton } from './RestartButton.tsx'
 import { RestartNotice } from './RestartNotice.tsx'
 import { RestartOverlay } from './RestartOverlay.tsx'
+import { ShutdownConfirmDialog } from './ShutdownConfirmDialog.tsx'
 import { en, zh } from './locales.ts'
 
 /** Required services. */
@@ -45,7 +46,7 @@ const listeners = new Set<() => void>()
 let localeSvc: { snapshot: { active: string } } | undefined
 
 /** Translate a key in the current UI language (module scope; components use props.t). */
-function tl(key: keyof typeof zh): string {
+export function tl(key: keyof typeof zh): string {
   const dict = localeSvc?.snapshot.active === 'en' ? en : zh
   return dict[key]
 }
@@ -256,6 +257,46 @@ export function onRestartChange(fn: () => void): () => void {
   return () => { listeners.delete(fn) }
 }
 
+// ---------------------------------------------------------------------------
+// /shutdown command → GUI confirm dialog
+// ---------------------------------------------------------------------------
+// The host `/shutdown` handler never shuts down directly: it signals
+// `SHUTDOWN_CONFIRM_PENDING` (a command/executed error text), and this client
+// shows the SAME confirm dialog as the power button. Confirm → beginPower
+// ('shutdown') POSTs the real shutdown; cancel just dismisses.
+const confirmListeners = new Set<() => void>()
+let confirmVisible = false
+
+function emitConfirm(): void {
+  for (const fn of confirmListeners) fn()
+}
+
+/** Show the shutdown confirm dialog (from the /shutdown command path). */
+export function requestShutdownConfirm(): void {
+  confirmVisible = true
+  emitConfirm()
+}
+
+/** Dismiss the dialog without acting. */
+export function cancelShutdownConfirm(): void {
+  confirmVisible = false
+  emitConfirm()
+}
+
+/** Whether the /shutdown confirm dialog is currently shown. */
+export function isShutdownConfirmVisible(): boolean {
+  return confirmVisible
+}
+
+/** Subscribe to dialog visibility changes. */
+export function onShutdownConfirmChange(fn: () => void): () => void {
+  confirmListeners.add(fn)
+  return () => { confirmListeners.delete(fn) }
+}
+
+/** Sentinel the host `/shutdown` handler returns to request the GUI dialog. */
+const SHUTDOWN_CONFIRM_PENDING = 'SHUTDOWN_CONFIRM_PENDING'
+
 export function apply(ctx: ClientContext): void {
   // Register UI strings so the button/overlay follow the DSH interface language.
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-restart-button: dictionaries')
@@ -308,4 +349,22 @@ export function apply(ctx: ClientContext): void {
       id: 'dsh-restart-notice',
       locale: NS,
     }, RestartNotice))
+
+  // /shutdown confirm dialog: the host handler signals SHUTDOWN_CONFIRM_PENDING
+  // through command/executed; this listener pops the same GUI dialog as the
+  // power button, and only a confirmed click actually shuts down.
+  ctx.effect(() => ctx.on('command/executed', (_sessionId, name, result) => {
+    if (name !== 'shutdown') return
+    const text = typeof (result as { text?: unknown } | undefined)?.text === 'string'
+      ? (result as { text: string }).text
+      : ''
+    if (text === SHUTDOWN_CONFIRM_PENDING) requestShutdownConfirm()
+  }), 'dsh-restart-button: shutdown command confirm')
+
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register({
+      name: 'shell.overlay',
+      id: 'dsh-restart-shutdown-confirm',
+      locale: NS,
+    }, ShutdownConfirmDialog))
 }

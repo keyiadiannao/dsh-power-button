@@ -807,36 +807,25 @@ export function apply(ctx, config: Config) {
     ctx.commands.register({
       name: 'shutdown',
       description: en
-        ? 'Shut down DeepSeek Harness (stop process; restart manually). Requires a confirm argument.'
-        : '关机 DeepSeek Harness（停止进程，需手动重新启动）。需要 confirm 参数确认。',
-      // The confirm argument makes /shutdown a command WITH input: without
-      // this descriptor the UI's slash matchEnter treats a bare /shutdown as
-      // a command but `/shutdown confirm` (an argued line) as a non-command
-      // and hands it to the model instead of the handler.
-      input: { hint: en ? 'confirm — irreversible shutdown' : 'confirm —— 不可逆关机' },
+        ? 'Shut down DeepSeek Harness (stop process; restart manually). Opens a GUI confirm dialog.'
+        : '关机 DeepSeek Harness（停止进程，需手动重新启动）。会弹出确认对话框。',
+      // Declared input so `/shutdown <anything>` reaches the handler (the UI's
+      // slash matchEnter treats argued lines as commands only when the command
+      // declares an input descriptor). The confirm dialog is GUI-side: the
+      // handler only signals SHUTDOWN_CONFIRM_PENDING, and the client pops the
+      // same dialog as the power button, then POSTs /shutdown on confirm.
+      input: { hint: en ? 'opens the shutdown confirm dialog' : '打开关机确认对话框' },
       recordInput: false,
-      async handler(invocation: { rawInput: string }) {
-        // Two-step confirmation for an irreversible action: `/shutdown` only
-        // explains, `/shutdown confirm` actually terminates. The rawInput is
-        // the verbatim text after the command name (kept out of the session
-        // log via recordInput: false, but still visible to the handler).
-        const arg = invocation.rawInput.trim().toLowerCase()
-        if (arg !== 'confirm' && arg !== 'yes') {
-          return {
-            kind: 'error',
-            text: en
-              ? 'Shutdown is irreversible. Type `/shutdown confirm` to proceed.'
-              : '关机不可逆。请再输入 `/shutdown confirm` 确认关机。',
-          }
+      async handler() {
+        // Signal the client to show the GUI confirm dialog (same one the power
+        // button uses). The handler does NOT shut down here: shutdown is
+        // irreversible, so the actual POST happens only after the user clicks
+        // confirm in the dialog. If the client dialog is unavailable (e.g. a
+        // non-UI caller), the command reports pending without any side effect.
+        return {
+          kind: 'error',
+          text: 'SHUTDOWN_CONFIRM_PENDING',
         }
-        if (!claimPowerTransition('shutdown')) {
-          return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
-        }
-        const result = shutdownDsh(ctx, undefined)
-        if (!result.ok) releasePowerTransition()
-        return result.ok
-          ? { kind: 'success', text: result.note }
-          : { kind: 'error', text: result.error ?? (en ? 'shutdown failed' : '关机失败') }
       },
     })
   }, 'dsh-restart-button: commands')
