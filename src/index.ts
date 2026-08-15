@@ -501,9 +501,12 @@ function scheduleRestartConfirmation(ctx): void {
         session.append('user/message', createUserMessage({
           content: [{
             type: 'text',
-            text: `✅ 已重启（实例 ${confirmation.fromInstanceId.slice(0, 8)} → ${INSTANCE_ID.slice(0, 8)}）`,
+            text: '已重启',
           }],
-          source: { kind: 'plugin', plugin: name, form: 'instructions' },
+          // `notice`: a one-off account of something that just happened —
+          // rendered as plain text in the flow (unlike `instructions`, which
+          // collapses into an "上下文注入" entry).
+          source: { kind: 'plugin', plugin: name, form: 'notice' },
         }), { surfaceOp: 'append' })
       } catch (error) {
         try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation append failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
