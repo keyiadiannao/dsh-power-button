@@ -503,10 +503,10 @@ function scheduleRestartConfirmation(ctx): void {
             type: 'text',
             text: '已重启',
           }],
-          // `notice`: a one-off account of something that just happened —
-          // rendered as plain text in the flow (unlike `instructions`, which
-          // collapses into an "上下文注入" entry).
-          source: { kind: 'plugin', plugin: name, form: 'notice' },
+          // Plain user source renders like a normal message (no "plugin /
+          // form" provenance labels). This is a host-inserted notice, NOT a
+          // model turn — it never wakes the LLM, so it costs zero tokens.
+          source: { kind: 'user' },
         }), { surfaceOp: 'append' })
       } catch (error) {
         try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation append failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
