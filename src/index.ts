@@ -348,7 +348,7 @@ function portFree(p) {
         try { process.exit(0) } catch { /* ignore */ }
       }
     }, delayMs)
-    return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启，约 10 秒后恢复。重启完成后 GET /api/dsh-restart-button/health 会返回 restarted:true 与 fromInstanceId 以确认新实例。' }
+    return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启，约 10 秒后恢复' }
   } catch (e) {
     return { ok: false, action: 'restart', error: e.message }
   }
