@@ -52,7 +52,7 @@ import z from '@deepseek-ai/schemastery'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools', 'commands', 'agents']
+export const inject = ['webServer', 'tools', 'commands', 'agents', 'sessions']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -470,13 +470,13 @@ function releasePowerTransition(): void {
 }
 
 /**
- * After a restart, wait for the recorded mid-turn sessions to be resumed
- * (the client re-opens them) and inject a visible "restart complete"
- * confirmation into each — so the user/agent sees the from→to instance ids
- * WITHOUT manually querying /health. Uses `agent.inject` (not `followup`):
- * the notice is queued for display but does NOT wake the agent for a new
- * LLM turn, so the confirmation costs zero tokens. Polls the live agent
- * registry; gives up after ~60s and clears the marker.
+ * After a restart, append a visible "restart complete" user message to each
+ * recorded session — the UI renders it directly from the session event log,
+ * so it does NOT depend on the agent being alive and does NOT wake any LLM
+ * turn (zero token cost). The message becomes part of the session context for
+ * the next natural turn, which is fine: it is a plain notice, not a prompt.
+ * Polls the session store briefly (a resumed session may not be live yet);
+ * clears the marker once all notices are appended.
  */
 function scheduleRestartConfirmation(ctx): void {
   const sessionIds = readResumeMarker()
@@ -490,30 +490,23 @@ function scheduleRestartConfirmation(ctx): void {
     return
   }
   const pending = new Set(sessionIds)
-  // No hard timeout: a session may be reopened long after restart. Check
-  // periodically (cheap), inject the zero-token confirmation the moment its
-  // agent comes back live, and only then clear the marker. The interval
-  // unrefs so it never keeps the process alive on its own.
   const interval = setInterval(() => {
     for (const sessionId of [...pending]) {
-      let agent: { inject(msg: unknown): void } | undefined
+      let session: { append(type: 'user/message', data: unknown, opts?: unknown): unknown } | undefined
       try {
-        agent = ctx.agents.get(sessionId)
-      } catch { /* registry unavailable */ }
-      if (agent === undefined) continue
+        session = ctx.sessions.get(sessionId)
+      } catch { /* store unavailable */ }
+      if (session === undefined) continue
       try {
-        // `inject` (not `followup`): queues a user-visible notice WITHOUT
-        // waking the agent for a new LLM turn — a restart confirmation needs
-        // no model work, so this costs zero tokens.
-        agent.inject(createUserMessage({
+        session.append('user/message', createUserMessage({
           content: [{
             type: 'text',
-            text: `✅ 重启完成：实例已从 ${confirmation.fromInstanceId} 重启到 ${INSTANCE_ID}。`,
+            text: `✅ 已重启（实例 ${confirmation.fromInstanceId.slice(0, 8)} → ${INSTANCE_ID.slice(0, 8)}）`,
           }],
           source: { kind: 'plugin', plugin: name, form: 'instructions' },
-        }))
+        }), { surfaceOp: 'append' })
       } catch (error) {
-        try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation inject failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
+        try { appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation append failed for ${sessionId}: ${String(error)}\n`) } catch { /* ignore */ }
       }
       pending.delete(sessionId)
     }
@@ -521,7 +514,7 @@ function scheduleRestartConfirmation(ctx): void {
       clearInterval(interval)
       clearResumeMarker()
     }
-  }, 2000)
+  }, 1000)
   interval.unref?.()
 }
 
