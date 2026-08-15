@@ -15,9 +15,9 @@
  */
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { useSyncExternalStore } from 'react'
+import { useEffect, useRef, useSyncExternalStore } from 'react'
 import {
-  getRestartPhase, getPowerAction, getRestartError, onRestartChange, beginPower, NS,
+  getRestartPhase, getPowerAction, getRestartError, onRestartChange, beginPower, dismissPower, NS,
 } from './index.ts'
 
 export type RestartOverlayProps = PropsRuntime<'shell.overlay'> & PropsLocale<typeof NS>
@@ -147,6 +147,17 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
   const action = useSyncExternalStore(onRestartChange, getPowerAction)
   const error = useSyncExternalStore(onRestartChange, getRestartError)
 
+  // Modal focus: when the overlay appears, move focus into the dialog so
+  // keyboard focus is not left behind on the sidebar/trigger (aria-modal).
+  // On error, land on the primary action (retry) if present.
+  const dialogRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (phase === 'idle') return
+    const retry = dialogRef.current?.querySelector<HTMLButtonElement>('button')
+    const target = phase === 'error' && retry ? retry : dialogRef.current
+    target?.focus()
+  }, [phase])
+
   if (phase === 'idle') return null
 
   const busy = phase === 'shutting' || phase === 'waiting' || phase === 'recovering'
@@ -205,7 +216,7 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
       }
 
   return (
-    <div style={VEIL} role="dialog" aria-modal="true" aria-label={shuttingDown ? t('shutdownDialog') : t('restartDialog')} aria-busy={busy}>
+    <div ref={dialogRef} tabIndex={-1} style={VEIL} role="dialog" aria-modal="true" aria-label={shuttingDown ? t('shutdownDialog') : t('restartDialog')} aria-busy={busy}>
       {/* keyframes: sweeping arc + progress fill transition + caption fade */}
       <style>{`
         @keyframes dsh-restart-sweep {
@@ -279,7 +290,7 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
       {phase === 'error' ? (
         <div style={{ ...ACTION_ROW, animation: 'dsh-restart-fade 0.35s ease 0.15s both' }}>
           <ActionButton label={t('retry')} onClick={() => beginPower(action)} />
-          <ActionButton label={t('close')} danger onClick={() => window.location.reload()} />
+          <ActionButton label={t('close')} onClick={dismissPower} />
         </div>
       ) : null}
     </div>

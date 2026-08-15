@@ -70,6 +70,21 @@ function fail(msg: string): void {
  * overwriting a newer flow's phase (e.g. error → waiting on retry). */
 let operationId = 0
 
+/** The instanceId of the DSH process this page loaded against. A restart is
+ * confirmed when health later reports a DIFFERENT id (new process), even if
+ * the brief down window was never observed. */
+let baselineInstanceId: string | null = null
+
+/** Capture the current process's instanceId once at plugin load. */
+async function captureInstanceId(): Promise<void> {
+  try {
+    const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
+    if (!r.ok) return
+    const j = await r.json().catch(() => ({})) as { instanceId?: string }
+    if (typeof j.instanceId === 'string') baselineInstanceId = j.instanceId
+  } catch { /* offline at load; seenDown fallback covers it */ }
+}
+
 /** Kick a restart or shutdown. Opens the overlay and drives the flow. */
 export function beginPower(next: PowerAction): void {
   const myOperation = ++operationId
@@ -81,15 +96,15 @@ export function beginPower(next: PowerAction): void {
 
   const endpoint = next === 'shutdown' ? '/api/dsh-restart-button/shutdown' : '/api/dsh-restart-button/restart'
 
-  // Fire-and-forget with `keepalive`: the request rides the browser's
-  // separate keepalive connection pool, so it is not stuck behind DSH's
-  // long-lived SSE streams (HTTP/1.1 allows only 6 in-flight requests per
-  // origin — without this the POST can sit queued for many seconds while the
-  // overlay freezes on the closing caption). The overlay flow is driven
-  // entirely by the health polls below, never by this POST's response.
+  // Fire-and-forget with `keepalive`: keepalive helps the power request
+  // survive page/document lifecycle changes (e.g. the old instance exiting).
+  // Do NOT rely on it as a guarantee of a separate HTTP connection pool.
+  // The overlay flow is driven entirely by the health polls below, never by
+  // this POST's response.
   void fetch(endpoint, { method: 'POST', keepalive: true })
     .then(async (r) => {
       const j = await r.json().catch(() => ({}))
+      if (!active()) return // stale operation; a newer flow owns the state
       if (!r.ok || (j as { ok?: boolean })?.ok === false) {
         fail((j as { error?: string })?.error ?? tl('opFailedHttp').replace('{0}', String(r.status)))
       }
@@ -133,16 +148,17 @@ export function beginPower(next: PowerAction): void {
 
   // Brief beat on the closing caption, then move to waiting.
   setTimeout(() => {
+    if (!active()) return
     if (phase === 'shutting') {
       phase = 'waiting'
       emit()
     }
   }, 600)
 
-  // Restart: poll health from the START, requiring at least one observed
-  // DOWN (connection refused — the old process is gone) before accepting an
-  // UP as the new instance. A delayed POST or a failed restart otherwise
-  // fakes success and reloads into an un-restarted app.
+  // Restart: poll health from the START. Success is confirmed by EITHER:
+  //   (a) observing a real DOWN (connection refused — old process gone), or
+  //   (b) the per-process instanceId changing (old A → new B), which works
+  //       even if the brief down window was missed.
   let seenDown = false
   let upTicks = 0
   let attempts = 0
@@ -157,9 +173,16 @@ export function beginPower(next: PowerAction): void {
       return
     }
     let up = false
+    let instanceChanged = false
     try {
       const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
       up = r.ok
+      if (r.ok) {
+        const j = await r.json().catch(() => ({})) as { instanceId?: string }
+        instanceChanged = baselineInstanceId !== null
+          && typeof j.instanceId === 'string'
+          && j.instanceId !== baselineInstanceId
+      }
     } catch { up = false }
 
     if (!up) {
@@ -172,13 +195,14 @@ export function beginPower(next: PowerAction): void {
       return
     }
 
-    // Server is up again after a confirmed down: the new instance is ready.
-    if (seenDown) {
+    // Server is up again: confirmed restart if we saw a down OR the instance
+    // id changed (new process answered).
+    if (seenDown || instanceChanged) {
       clearInterval(timer)
       phase = 'recovering'
       emit()
       // Let the ring transition to 100% (1.1s) before reloading.
-      setTimeout(() => window.location.reload(), 1300)
+      setTimeout(() => { if (active()) window.location.reload() }, 1300)
       return
     }
 
@@ -195,6 +219,17 @@ export function beginPower(next: PowerAction): void {
   }, 1000)
 }
 
+/** Dismiss the error overlay without reloading: cancels any in-flight flow
+ * and returns to idle. The restart may have killed the old process without
+ * a new one up — reloading here would bounce to a dead page, so just close
+ * the dialog and let the user act (refresh manually if they wish). */
+export function dismissPower(): void {
+  operationId += 1 // invalidate any stale timers
+  phase = 'idle'
+  errorMsg = null
+  emit()
+}
+
 /** Subscribe to power-flow changes; returns an unsubscribe. */
 export function onRestartChange(fn: () => void): () => void {
   listeners.add(fn)
@@ -208,17 +243,20 @@ export function apply(ctx: ClientContext): void {
   // Capture the locale service for module-scope (non-component) error strings.
   localeSvc = ctx.locale
 
+  // Record the current process's instanceId; restart success compares against
+  // it (new process → different id).
+  void captureInstanceId()
+
   // Self-contained layout fix: this plugin's footer button is full-width
   // (width: calc(100% + 8px)), so it needs the sidebar's footer-actions
   // container to wrap — one full-width occupant per row. The stock DSH css
   // uses `display: flex` without `flex-wrap`, which squeezes a second
   // full-width button (e.g. the suite-panel button) beside the first. Inject
   // the wrap here so the plugin works on unmodified official DSH builds too.
-  // Selector: CSS-module class names end in `_footerActions` (e.g.
-  // `NwAuyq_footerActions`); the hash prefix is build-specific so match the
-  // stable suffix. The `:has()` guard limits the change to footer rows that
-  // actually contain this plugin's button, so other plugins' rows are
-  // untouched; an id prevents duplicate <style> on hot reload.
+  // Scope the host-container workaround to the footerActions instance that
+  // contains this plugin. Sibling actions in that SAME container will also
+  // participate in wrapping; other footer containers are untouched. An id
+  // prevents duplicate <style> on hot reload.
   const STYLE_ID = 'dsh-restart-button-style'
   let styleEl = document.getElementById(STYLE_ID) as HTMLStyleElement | null
   if (styleEl === null) {

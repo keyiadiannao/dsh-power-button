@@ -235,6 +235,25 @@ function isTrustedPowerRequest(req): boolean {
   }
 }
 
+/**
+ * At-most-once latch for destructive power transitions. Restart and shutdown
+ * both end the current process; a second POST (duplicate tab, model tool +
+ * UI race, client retry) must not spawn a second helper or double-exit.
+ * Claimed on first POST, released only if the action fails synchronously
+ * (the process is exiting on success, so the latch never needs clearing).
+ */
+let powerTransition: 'restart' | 'shutdown' | null = null
+
+function claimPowerTransition(action: 'restart' | 'shutdown'): boolean {
+  if (powerTransition !== null) return false
+  powerTransition = action
+  return true
+}
+
+function releasePowerTransition(): void {
+  powerTransition = null
+}
+
 export function apply(ctx) {
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
@@ -248,13 +267,28 @@ export function apply(ctx) {
         return json(res, 403, { ok: false, error: 'forbidden: cross-origin power request' })
       }
       try {
-        if (sub === '/restart' && req.method === 'POST') return json(res, 200, restartDsh(ctx))
-        if (sub === '/shutdown' && req.method === 'POST') return json(res, 200, shutdownDsh(res))
+        if (sub === '/restart' && req.method === 'POST') {
+          if (!claimPowerTransition('restart')) {
+            return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition}` })
+          }
+          const result = restartDsh(ctx)
+          if (!result.ok) releasePowerTransition()
+          return json(res, result.ok ? 200 : 500, result)
+        }
+        if (sub === '/shutdown' && req.method === 'POST') {
+          if (!claimPowerTransition('shutdown')) {
+            return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition}` })
+          }
+          const result = shutdownDsh(res)
+          if (!result.ok) releasePowerTransition()
+          return json(res, result.ok ? 200 : 500, result)
+        }
         if (sub === '/health' && req.method === 'GET') {
           return json(res, 200, { ok: true, instanceId: INSTANCE_ID })
         }
         json(res, 404, { ok: false, error: `no dsh-restart-button endpoint ${sub}` })
       } catch (e) {
+        releasePowerTransition()
         json(res, 500, { ok: false, error: e.message })
       }
     },
@@ -292,7 +326,14 @@ export function apply(ctx) {
       async execute(args) {
         const a = (args ?? {}) as { delayMs?: number }
         const delayMs = Number(a.delayMs) > 0 ? Math.floor(Number(a.delayMs)) : 2000
-        return restartDsh(ctx, delayMs)
+        // Same at-most-once latch as the HTTP endpoints: the model tool and a
+        // concurrent UI click must not spawn two helpers.
+        if (!claimPowerTransition('restart')) {
+          return { ok: false, error: `power transition already in progress: ${powerTransition}` }
+        }
+        const result = restartDsh(ctx, delayMs)
+        if (!result.ok) releasePowerTransition()
+        return result
       },
     })
   } catch (error) {
