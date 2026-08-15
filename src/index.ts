@@ -54,10 +54,6 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 export const name = 'dsh-restart-button'
 export const inject = ['webServer', 'tools', 'commands', 'agents']
 
-/** Sessions that were mid-turn at restart time: recorded so the new instance
- * can auto-confirm the restart in the resumed conversation. */
-const RESUME_MARKER_FILE = path.join(RUNTIME_DIR, 'dsh-restart-resume.json')
-
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
   /** Register the `restart_harness` model tool. On by default: the owner uses
@@ -84,6 +80,10 @@ function dshHome(): string {
   return path.join(os.homedir(), '.dsh')
 }
 const RUNTIME_DIR = dshHome()
+
+/** Sessions that were mid-turn at restart time: recorded so the new instance
+ * can auto-confirm the restart in the resumed conversation. */
+const RESUME_MARKER_FILE = path.join(RUNTIME_DIR, 'dsh-restart-resume.json')
 
 /** Per-process identity: fixed for this instance's lifetime. The client can
  * compare it across a restart to confirm a NEW process answered (stronger
