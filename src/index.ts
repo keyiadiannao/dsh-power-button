@@ -434,7 +434,7 @@ function portFree(p) {
     } catch {
       scheduleExit()
     }
-    return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启' }
+    return { ok: true, action: 'restart', note: isEnglishLocale(ctx) ? 'DeepSeek Harness is restarting' : 'DeepSeek Harness 正在重启' }
   } catch (e) {
     return { ok: false, action: 'restart', error: e.message }
   }
@@ -488,7 +488,13 @@ function shutdownDsh(ctx, res) {
       // command result flushes.
       setTimeout(exitSoon, 300).unref()
     }
-    return { ok: true, action: 'shutdown', note: 'DeepSeek Harness 正在关机（进程停止后需手动重新启动）' }
+    return {
+      ok: true,
+      action: 'shutdown',
+      note: isEnglishLocale(ctx)
+        ? 'DeepSeek Harness is shutting down (start it again manually)'
+        : 'DeepSeek Harness 正在关机（进程停止后需手动重新启动）',
+    }
   } catch (e) {
     return { ok: false, action: 'shutdown', error: e.message }
   }
@@ -583,16 +589,21 @@ function releasePowerTransition(): void {
  * resumed session may not be live yet); clears the marker once all notices
  * are appended.
  */
-/** The restart confirmation text, matched to the UI language (DSH settings
- * `locale.preference`: 'zh' | 'en' | …). Falls back to Chinese when the
- * settings service is unavailable or the preference is unknown. */
-function restartConfirmationText(ctx): string {
+/** Whether the UI language is English (DSH settings `locale.preference`). */
+function isEnglishLocale(ctx): boolean {
   try {
     const locale = ctx.settings?.get?.('locale') as { preference?: string } | undefined
     const pref = typeof locale?.preference === 'string' ? locale.preference.toLowerCase() : ''
-    if (pref.startsWith('en')) return 'Restarted'
+    return pref.startsWith('en')
   } catch { /* settings unavailable */ }
-  return '已重启'
+  return false
+}
+
+/** The restart confirmation text, matched to the UI language. Falls back to
+ * Chinese when the settings service is unavailable or the preference is
+ * unknown. */
+function restartConfirmationText(ctx): string {
+  return isEnglishLocale(ctx) ? 'Restarted' : '已重启'
 }
 
 function scheduleRestartConfirmation(ctx): void {
@@ -764,18 +775,24 @@ export function apply(ctx, config: Config) {
     try {
       ctx.tools.register({
         name: 'restart_harness',
-        description:
-          '重启整个 DeepSeek Harness 进程，用于重新加载插件与配置（profile 的 cordis 组合、settings 等）。'
-          + '由 dsh-restart-button 提供（独立实现）：派生一个 detach 的 helper，'
-          + '在旧进程退出并释放端口后以原命令行在原目录重新拉起，然后旧进程退出。'
-          + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
-          + '返回 ok 与说明文本。',
+        description: isEnglishLocale(ctx)
+          ? 'Restart the whole DeepSeek Harness process to reload plugins and config (profile cordis layers, settings, etc). '
+            + 'Provided by dsh-restart-button (standalone): spawns a detached helper that waits for the old process to exit and the port to free, '
+            + 'then relaunches with the same command line and cwd, after which the old process exits. '
+            + 'The current session connection drops briefly and the page auto-reconnects. Returns ok and a note.'
+          : '重启整个 DeepSeek Harness 进程，用于重新加载插件与配置（profile 的 cordis 组合、settings 等）。'
+            + '由 dsh-restart-button 提供（独立实现）：派生一个 detach 的 helper，'
+            + '在旧进程退出并释放端口后以原命令行在原目录重新拉起，然后旧进程退出。'
+            + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
+            + '返回 ok 与说明文本。',
         parameters: {
           type: 'object',
           properties: {
             delayMs: {
               type: 'number',
-              description: `旧进程退出前等待的毫秒数（给当前结果留出回传时间），默认 2000，上限 ${cfg.maxDelayMs}。`,
+              description: isEnglishLocale(ctx)
+                ? `ms to wait before the old process exits (gives the current result time to flush), default 2000, max ${cfg.maxDelayMs}.`
+                : `旧进程退出前等待的毫秒数（给当前结果留出回传时间），默认 2000，上限 ${cfg.maxDelayMs}。`,
             },
           },
         },
@@ -824,9 +841,12 @@ export function apply(ctx, config: Config) {
   // `/restart` and `/shutdown` share the same at-most-once latch as the UI
   // and the model tool, so a command cannot race a button click.
   ctx.effect(() => {
+    const en = isEnglishLocale(ctx)
     ctx.commands.register({
       name: 'restart',
-      description: '重启 DeepSeek Harness（重载插件与配置）',
+      description: en
+        ? 'Restart DeepSeek Harness (reload plugins & config)'
+        : '重启 DeepSeek Harness（重载插件与配置）',
       recordInput: false,
       async handler() {
         if (!claimPowerTransition('restart')) {
@@ -836,12 +856,14 @@ export function apply(ctx, config: Config) {
         if (!result.ok) releasePowerTransition()
         return result.ok
           ? { kind: 'success', text: result.note }
-          : { kind: 'error', text: result.error ?? '重启失败' }
+          : { kind: 'error', text: result.error ?? (en ? 'restart failed' : '重启失败') }
       },
     })
     ctx.commands.register({
       name: 'shutdown',
-      description: '关机 DeepSeek Harness（停止进程，需手动重新启动）',
+      description: en
+        ? 'Shut down DeepSeek Harness (stop process; restart manually)'
+        : '关机 DeepSeek Harness（停止进程，需手动重新启动）',
       recordInput: false,
       async handler() {
         if (!claimPowerTransition('shutdown')) {
@@ -851,7 +873,7 @@ export function apply(ctx, config: Config) {
         if (!result.ok) releasePowerTransition()
         return result.ok
           ? { kind: 'success', text: result.note }
-          : { kind: 'error', text: result.error ?? '关机失败' }
+          : { kind: 'error', text: result.error ?? (en ? 'shutdown failed' : '关机失败') }
       },
     })
   }, 'dsh-restart-button: commands')
