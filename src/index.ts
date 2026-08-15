@@ -81,9 +81,20 @@ function dshHome(): string {
 }
 const RUNTIME_DIR = dshHome()
 
-/** Sessions that were mid-turn at restart time: recorded so the new instance
- * can auto-confirm the restart in the resumed conversation. */
-const RESUME_MARKER_FILE = path.join(RUNTIME_DIR, 'dsh-restart-resume.json')
+/** Per-instance marker paths (keyed by port). */
+function resumeMarkerPath(): string {
+  return path.join(RUNTIME_DIR, `dsh-restart-resume-${CURRENT_PORT}.json`)
+}
+
+/** Port this instance serves, resolved at apply time. Markers are keyed by
+ * port so concurrent instances (e.g. :3080 and :3081) never read each other's
+ * restart/resume markers — otherwise instance B would consume instance A's
+ * marker and wrongly report "restarted from A". */
+let CURRENT_PORT = 3080
+
+function markerPath(): string {
+  return path.join(RUNTIME_DIR, `dsh-restart-marker-${CURRENT_PORT}.json`)
+}
 
 /** Per-process identity: fixed for this instance's lifetime. The client can
  * compare it across a restart to confirm a NEW process answered (stronger
@@ -106,12 +117,10 @@ const LOG_FILE = path.join(RUNTIME_DIR, `restart-helper-${process.pid}.log`)
  * helper (relaunch confirmation), read by the new process at apply time.
  * Lets a /restart command, the model tool, or a UI click answer the question
  * "did it really restart?" — the new instance reports
- * `restarted: true, fromInstanceId: <old>` on /health. */
-const MARKER_FILE = path.join(RUNTIME_DIR, 'dsh-restart-marker.json')
-
+ * `restarted: true, fromInstanceId: <old>` on /health. Keyed by port. */
 function readMarker(): Record<string, unknown> | null {
   try {
-    return JSON.parse(fs.readFileSync(MARKER_FILE, 'utf8')) as Record<string, unknown>
+    return JSON.parse(fs.readFileSync(markerPath(), 'utf8')) as Record<string, unknown>
   } catch {
     return null
   }
@@ -120,7 +129,7 @@ function readMarker(): Record<string, unknown> | null {
 function writeMarker(data: Record<string, unknown>): void {
   try {
     fs.mkdirSync(RUNTIME_DIR, { recursive: true })
-    fs.writeFileSync(MARKER_FILE, JSON.stringify(data), 'utf8')
+    fs.writeFileSync(markerPath(), JSON.stringify(data), 'utf8')
   } catch { /* best-effort */ }
 }
 
@@ -131,7 +140,7 @@ function consumeRestartConfirmation(): { fromInstanceId: string } | null {
   const oldId = marker.fromInstanceId
   if (typeof oldId !== 'string' || oldId === INSTANCE_ID) {
     // Stale or self-referential marker: clear it and report nothing.
-    try { fs.unlinkSync(MARKER_FILE) } catch { /* ignore */ }
+    try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
     return null
   }
   // This is a NEW process that was launched by the restart helper.
@@ -154,13 +163,13 @@ function runningSessionIds(ctx): string[] {
 function writeResumeMarker(sessionIds: string[]): void {
   try {
     fs.mkdirSync(RUNTIME_DIR, { recursive: true })
-    fs.writeFileSync(RESUME_MARKER_FILE, JSON.stringify({ sessionIds, at: new Date().toISOString() }), 'utf8')
+    fs.writeFileSync(resumeMarkerPath(), JSON.stringify({ sessionIds, at: new Date().toISOString() }), 'utf8')
   } catch { /* best-effort */ }
 }
 
 function readResumeMarker(): string[] {
   try {
-    const j = JSON.parse(fs.readFileSync(RESUME_MARKER_FILE, 'utf8')) as { sessionIds?: string[] }
+    const j = JSON.parse(fs.readFileSync(resumeMarkerPath(), 'utf8')) as { sessionIds?: string[] }
     return Array.isArray(j.sessionIds) ? j.sessionIds : []
   } catch {
     return []
@@ -168,7 +177,7 @@ function readResumeMarker(): string[] {
 }
 
 function clearResumeMarker(): void {
-  try { fs.unlinkSync(RESUME_MARKER_FILE) } catch { /* already gone */ }
+  try { fs.unlinkSync(resumeMarkerPath()) } catch { /* already gone */ }
 }
 
 /**
@@ -254,7 +263,7 @@ const cwd = ${JSON.stringify(cwd)};
 const PORT = ${port};
 const OLD_PID = ${process.pid};
 const OLD_INSTANCE = ${JSON.stringify(INSTANCE_ID)};
-const MARKER = ${JSON.stringify(MARKER_FILE)};
+const MARKER = ${JSON.stringify(markerPath())};
 const LOG = ${JSON.stringify(LOG_FILE)};
 const SERVER_LOG = ${JSON.stringify(serverLog)};
 function log(m) {
@@ -509,6 +518,9 @@ function scheduleRestartConfirmation(ctx): void {
 }
 
 export function apply(ctx, config: Config) {
+  // Resolve THIS instance's port first: markers are keyed by port so
+  // concurrent instances never read each other's restart/resume markers.
+  CURRENT_PORT = resolvePort(ctx)
   // If the restart marker names a DIFFERENT previous instance, this process
   // is the freshly-relaunched one — record it for /health confirmation.
   restartConfirmation = consumeRestartConfirmation()
