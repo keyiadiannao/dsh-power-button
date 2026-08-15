@@ -38,6 +38,9 @@ declare function redactCommandLine(parts: readonly string[]): string;
 /** Floor/clamp the model-visible restart delay: the model must never be able
  * to kill the process before its own tool/result and turn boundary settle. */
 declare function clampModelDelayMs(raw: number, maxDelayMs: number): number;
+/** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
+ * accumulate one file per restart forever. Best-effort, never throws. */
+declare function pruneOldRestartLogs(maxAgeDays?: number): void;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { Config, apply, clampModelDelayMs, consumeRestartConfirmation, inject, markerPath, name, redactCommandLine, writeMarker };
+export { Config, apply, clampModelDelayMs, consumeRestartConfirmation, inject, markerPath, name, pruneOldRestartLogs, redactCommandLine, writeMarker };

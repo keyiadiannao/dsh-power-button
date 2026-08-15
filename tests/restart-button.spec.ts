@@ -1,21 +1,15 @@
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 
-// Isolate DSH_HOME BEFORE importing the module: RUNTIME_DIR is captured at
-// module load, so the marker tests never touch the real ~/.dsh.
-const testHome = mkdtempSync(join(tmpdir(), 'dsh-restart-test-'))
-process.env.DSH_HOME = testHome
+// DSH_HOME is set by tests/setup.ts BEFORE this module is imported, so
+// RUNTIME_DIR (captured at module load) points at an isolated temp dir.
+const testHome = process.env.DSH_HOME as string
 
-import { afterAll, describe, expect, it } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import {
   consumeRestartConfirmation, writeMarker, markerPath,
-  redactCommandLine, clampModelDelayMs,
+  redactCommandLine, clampModelDelayMs, pruneOldRestartLogs,
 } from '../src/index.ts'
-
-afterAll(() => {
-  rmSync(testHome, { recursive: true, force: true })
-})
 
 describe('restart marker lifecycle', () => {
   it('consumeRestartConfirmation returns the old instance and deletes the marker', () => {
@@ -66,5 +60,21 @@ describe('redactCommandLine', () => {
   it('redacts bare secret-shaped tokens (no key prefix)', () => {
     const out = redactCommandLine(['dsh', 'sk-proj-1234567890abcdef'])
     expect(out).not.toContain('sk-proj-1234567890abcdef')
+  })
+})
+
+describe('pruneOldRestartLogs', () => {
+  it('removes stale restart-helper logs and keeps recent ones', () => {
+    const oldLog = join(testHome, 'restart-helper-1111.log')
+    const freshLog = join(testHome, 'restart-helper-2222.log')
+    writeFileSync(oldLog, 'old', 'utf8')
+    writeFileSync(freshLog, 'fresh', 'utf8')
+    const past = new Date(Date.now() - 10 * 24 * 3600 * 1000)
+    utimesSync(oldLog, past, past)
+
+    pruneOldRestartLogs(7)
+
+    expect(existsSync(oldLog)).toBe(false)
+    expect(existsSync(freshLog)).toBe(true)
   })
 })

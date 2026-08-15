@@ -264,6 +264,21 @@ export function clampModelDelayMs(raw: number, maxDelayMs: number): number {
     : 2000
 }
 
+/** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
+ * accumulate one file per restart forever. Best-effort, never throws. */
+export function pruneOldRestartLogs(maxAgeDays = 7): void {
+  try {
+    const cutoff = Date.now() - maxAgeDays * 24 * 3600 * 1000
+    for (const name of fs.readdirSync(RUNTIME_DIR)) {
+      if (!name.startsWith('restart-helper-') || !name.endsWith('.log')) continue
+      const full = path.join(RUNTIME_DIR, name)
+      try {
+        if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full)
+      } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
 // Boot-time breadcrumb: record how THIS process was invoked so the relaunch
 // derivation can be verified against reality (execArgv vs argv split). The
 // command line can carry credentials, so every part goes through the
@@ -664,6 +679,8 @@ function scheduleRestartConfirmation(ctx): void {
 }
 
 export function apply(ctx, config: Config) {
+  // Startup housekeeping: prune stale restart-helper logs from previous runs.
+  pruneOldRestartLogs()
   // Resolve THIS instance's port first: markers are keyed by port so
   // concurrent instances never read each other's restart/resume markers.
   CURRENT_PORT = resolvePort(ctx)
