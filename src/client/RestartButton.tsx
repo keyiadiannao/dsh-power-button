@@ -10,27 +10,46 @@
  * the full-screen restart/shutdown overlay.
  */
 import { useEffect, useRef, useState } from 'react'
-import { beginPower } from './index.ts'
+import type { PropsLocale } from '@deepseek-ai/dsh-client-ui-slots'
+import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import { beginPower, NS } from './index.ts'
 
-export type RestartButtonProps = { wide: boolean }
+export type RestartButtonProps = { wide: boolean } & PropsLocale<typeof NS>
 
 const MENU_W = 220
 
 export function RestartButton(props: RestartButtonProps): JSX.Element {
+  const { t } = props
   const [open, setOpen] = useState(false)
   const btnRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
-  // Close on outside click or Escape.
+  // Close on outside click or Escape; move focus into the menu on open and
+  // back to the trigger on close (WAI-ARIA menu-button pattern).
   useEffect(() => {
     if (!open) return
+    const firstItem = menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+    firstItem?.focus()
     const onDown = (e: MouseEvent): void => {
       const t = e.target as Node
       if (btnRef.current?.contains(t) || menuRef.current?.contains(t)) return
       setOpen(false)
+      btnRef.current?.focus()
     }
     const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') setOpen(false)
+      if (e.key === 'Escape') {
+        setOpen(false)
+        btnRef.current?.focus()
+        return
+      }
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+      e.preventDefault()
+      const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+      const idx = items.indexOf(document.activeElement as HTMLButtonElement)
+      const delta = e.key === 'ArrowDown' ? 1 : -1
+      if (items.length === 0) return
+      const next = items[(idx + delta + items.length) % items.length]
+      next?.focus()
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -65,10 +84,11 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
       <button
         ref={btnRef}
         type="button"
+        className="dsh-restart-button"
         onClick={() => setOpen(o => !o)}
         aria-haspopup="menu"
         aria-expanded={open}
-        title="电源（重启 / 关机）"
+        title={t('powerTitle')}
         style={{
           display: 'flex',
           alignItems: 'center',
@@ -100,14 +120,14 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
           <path d="M12 3v8" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
           <path d="M7.5 5.6a8 8 0 1 0 9 0" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
         </svg>
-        {props.wide && <span>电源</span>}
+        {props.wide && <span>{t('power')}</span>}
       </button>
 
       {open ? (
         <div
           ref={menuRef}
           role="menu"
-          aria-label="电源"
+          aria-label={t('power')}
           style={{
             ...anchor(),
             zIndex: 1500,
@@ -125,8 +145,8 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
           }}
         >
           <MenuItem
-            label="重启"
-            title="重新启动 DeepSeek Harness"
+            label={t('restart')}
+            title={t('restartHint')}
             onClick={() => pick('restart')}
             glyph={
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flex: '0 0 auto' }}>
@@ -136,8 +156,8 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
             }
           />
           <MenuItem
-            label="关机"
-            title="停止 DeepSeek Harness，之后需手动启动"
+            label={t('shutdown')}
+            title={t('shutdownHint')}
             onClick={() => pick('shutdown')}
             glyph={
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flex: '0 0 auto' }}>

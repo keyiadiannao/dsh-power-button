@@ -3,3 +3,4 @@ node_modules/
 restart-helper.ps1
 restart-helper.cmd
 *.tsbuildinfo
+PUBLISH_STATUS.md

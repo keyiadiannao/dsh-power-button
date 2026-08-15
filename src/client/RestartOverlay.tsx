@@ -13,14 +13,14 @@
  * back. Fully self-contained: own styles, own state (via the module store in
  * index.ts). Nothing is imported from any other plugin.
  */
-import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { useSyncExternalStore } from 'react'
 import {
-  getRestartPhase, getPowerAction, getRestartError, onRestartChange, beginPower,
+  getRestartPhase, getPowerAction, getRestartError, onRestartChange, beginPower, NS,
 } from './index.ts'
 
-export type RestartOverlayProps = PropsRuntime<'shell.overlay'>
+export type RestartOverlayProps = PropsRuntime<'shell.overlay'> & PropsLocale<typeof NS>
 
 const RING_R = 52
 const RING_C = 2 * Math.PI * RING_R
@@ -141,7 +141,8 @@ function PowerGlyph({ size = 40 }: { size?: number }): JSX.Element {
   )
 }
 
-export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null {
+export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
+  const { t } = props
   const phase = useSyncExternalStore(onRestartChange, getRestartPhase)
   const action = useSyncExternalStore(onRestartChange, getPowerAction)
   const error = useSyncExternalStore(onRestartChange, getRestartError)
@@ -175,36 +176,36 @@ export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null 
 
   const captions: Record<string, string> = shuttingDown
     ? {
-        shutting: '正在关机 DeepSeek Harness…',
-        waiting: '正在关机…',
-        recovering: '正在恢复…',
-        off: '已关机',
-        error: '关机出现问题',
+        shutting: t('shutdownClosing'),
+        waiting: t('shutdownWaiting'),
+        recovering: t('recovering'),
+        off: t('off'),
+        error: t('shutdownProblem'),
       }
     : {
-        shutting: '正在关闭 DeepSeek Harness…',
-        waiting: '正在重启…',
-        recovering: '正在恢复…',
-        error: '重启出现问题',
+        shutting: t('restartClosing'),
+        waiting: t('restarting'),
+        recovering: t('recovering'),
+        error: t('restartProblem'),
       }
 
   const subs: Record<string, string> = shuttingDown
     ? {
-        shutting: '正在结束进程，即将断开连接',
-        waiting: '等待进程退出',
-        recovering: '正在恢复…',
-        off: '可以关闭此页面了；需要时请手动重新启动 DSH',
-        error: error ?? '未知错误',
+        shutting: t('shutdownSaving'),
+        waiting: t('shutdownWaitingSub'),
+        recovering: t('recovering'),
+        off: t('offHint'),
+        error: error ?? t('opFailed'),
       }
     : {
-        shutting: '正在结束进程，即将断开连接',
-        waiting: '等待旧进程退出，新实例即将启动',
-        recovering: '新实例已就绪，正在刷新页面',
-        error: error ?? '未知错误',
+        shutting: t('restartSaving'),
+        waiting: t('restartWaiting'),
+        recovering: t('restartReady'),
+        error: error ?? t('opFailed'),
       }
 
   return (
-    <div style={VEIL} role="dialog" aria-label={shuttingDown ? '关机 DeepSeek Harness' : '重启 DeepSeek Harness'} aria-busy={busy}>
+    <div style={VEIL} role="dialog" aria-modal="true" aria-label={shuttingDown ? t('shutdownDialog') : t('restartDialog')} aria-busy={busy}>
       {/* keyframes: sweeping arc + progress fill transition + caption fade */}
       <style>{`
         @keyframes dsh-restart-sweep {
@@ -255,13 +256,8 @@ export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null 
             />
           </svg>
         ) : null}
-        {/* power button */}
-        <button
-          type="button"
-          style={POWER_BTN}
-          tabIndex={-1}
-          aria-hidden={!busy}
-        >
+        {/* power glyph — decorative, not interactive */}
+        <div style={POWER_BTN} aria-hidden="true">
           <span
             style={{
               color: phase === 'error' ? '#ff8592' : '#eef2f9',
@@ -270,10 +266,10 @@ export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null 
           >
             <PowerGlyph />
           </span>
-        </button>
+        </div>
       </div>
 
-      <div key={phase} style={{ ...CAPTION, animation: 'dsh-restart-fade 0.35s ease' }}>
+      <div key={phase} style={{ ...CAPTION, animation: 'dsh-restart-fade 0.35s ease' }} aria-live="polite">
         {captions[phase]}
       </div>
       <div key={`sub-${phase}`} style={{ ...SUB, animation: 'dsh-restart-fade 0.35s ease 0.08s both' }}>
@@ -282,8 +278,8 @@ export function RestartOverlay(_props: RestartOverlayProps): JSX.Element | null 
 
       {phase === 'error' ? (
         <div style={{ ...ACTION_ROW, animation: 'dsh-restart-fade 0.35s ease 0.15s both' }}>
-          <ActionButton label="重试" onClick={() => beginPower(action)} />
-          <ActionButton label="关闭" danger onClick={() => window.location.reload()} />
+          <ActionButton label={t('retry')} onClick={() => beginPower(action)} />
+          <ActionButton label={t('close')} danger onClick={() => window.location.reload()} />
         </div>
       ) : null}
     </div>
