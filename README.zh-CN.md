@@ -55,13 +55,14 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-restart-button#master"
 [客户端] 轮询 health → 确认新 instanceId → 自动刷新
 ```
 
-关机则 POST `/api/dsh-restart-button/shutdown`,终止且不拉起。
+关机则 POST `/api/dsh-restart-button/shutdown`,终止且不拉起。由于关机不可逆(进程停止后需手动启动),GUI 在关机前会**弹确认对话框**,需要再次点击确认才执行。(`/shutdown` 命令与模型工具保持单次触发;模型不暴露关机。)
 
 开发中踩过的坑:
 
 - helper 必须**脱离进程树**(detached + unref),否则终止 DSH 时 helper 一起被杀
 - helper 写成**真实 .cjs 文件**而非 `node -e`:多行 `node -e` 脚本会被 Windows `CreateProcess` 破坏成静默 `SyntaxError`
 - 重启成功以**每次进程独立的 `instanceId` 变化**(旧→新)为准,短暂离线本身不算成功
+- **持久写静止检查**:旧进程退出、端口释放后,helper 轮询所有会话日志的 `(size, mtimeMs)` 直到连续两次采样一致(上限约 15 秒)才重启。旧进程主循环退出后其会话写缓冲可能仍在落盘;在仍在追加的文件上拉起新进程会插入旧 seq 造成会话损坏——此检查封堵了这个窗口
 
 ## 安全
 
@@ -71,18 +72,19 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-restart-button#master"
 - 重启 marker 在启动时**消费即删除**,后续普通启动不会误报"重启过"
 - 命令行日志**脱敏**(凭据不会进入 `~/.dsh/restart-helper-<pid>.log`);helper 与 marker 文件以 `0600` 写入,运行目录 `0700`
 
-## 会话内的重启确认
+## 重启确认——纯 UI 提示,绝不写入会话
 
-重启成功后,插件会向恢复的会话追加一条本地化的 `已重启` / `Restarted`
-提示,使其像普通消息一样出现在聊天记录中(产品需求)。严格说它**并非零
-token**:它以 `surfaceOp: append` 追加到会话 **surface**,因此可能进入后续
-模型轮次的输入上下文——只是它本身从不触发 LLM 请求。它使用了合成的
-`assistant/message`(`turn: 0, step: 0`),这是兼容性方案,而非官方支持的
-assistant 边界。上游跟踪:
-[deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802)
-(下游插件无法持久化自己的非 surface 事件)。最终目标是使用 durable、
-非 surface 的 `restart/completed` 事件 + 客户端 `ConversationNodeDefinition`
-渲染,使其完全脱离模型 surface。
+重启成功后,插件会在界面角落弹出一条本地化的 `已重启` / `Restarted`
+toast。这是**纯 UI 提示**:不会向任何会话日志写入内容。(此前的设计会向
+恢复的会话追加合成的 `assistant/message`(`turn: 0, step: 0`)——该方案会
+触发 token-meter 的 step 配对不变量并可能损坏大会话,已移除。上游跟踪:
+[deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802)。)
+
+机制:
+- 启动时若消费到重启 marker,`/health` 会报告 `restarted: true, fromInstanceId: <old>`
+- 客户端加载后查询一次 `/health`;若 `restarted` 为真则显示 toast,然后通过
+  `POST /api/dsh-restart-button/notice-shown` 确认,避免刷新后重复弹出
+- 由于确认消息完全不触碰会话文件,重启**不再可能损坏会话日志**或留下未配对事件
 
 ## 开发
 

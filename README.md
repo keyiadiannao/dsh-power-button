@@ -56,13 +56,14 @@ click power → menu → Restart
 [client]  poll health → confirm new instanceId → auto reload
 ```
 
-Shutdown posts `/api/dsh-restart-button/shutdown` and terminates without relaunching.
+Shutdown posts `/api/dsh-restart-button/shutdown` and terminates without relaunching. Because it is irreversible (the process must be started manually), the GUI **confirms shutdown in a dialog** before it fires — a second click is required. (`/shutdown` and the model tool remain single-action by design; the model never exposes shutdown.)
 
 Design notes (from real issues hit during development):
 
 - The helper must run **outside the process tree** (`detached` + `unref`), otherwise terminating DSH kills the helper mid-flight.
 - The helper is a **real `.cjs` file**, not `node -e`: multi-line `node -e` scripts are mangled by Windows `CreateProcess` and die with a silent `SyntaxError`.
 - Restart success is confirmed by a per-process `instanceId` that must **change** (old → new), so a brief outage alone never fakes success.
+- **Durable-write quiescence**: after the old process exits and the port frees, the helper polls every session log's `(size, mtimeMs)` until two consecutive samples are identical (bounded at ~15s) before relaunching. The old process's session write-behind buffer can keep draining after its main loop exits; relaunching into a file that is still being appended interleaves stale seq numbers and corrupts the session — this check closes that window.
 
 ## Safety
 
@@ -72,21 +73,24 @@ Design notes (from real issues hit during development):
 - The restart marker is **consumed (deleted) on boot**, so a later ordinary launch never misreports a restart.
 - Command-line logging is **redacted** (credentials never reach `~/.dsh/restart-helper-<pid>.log`); helper and marker files are written `0600`, the runtime directory `0700`.
 
-## Restart confirmation in the transcript
+## Restart confirmation — UI toast, never written into a session
 
-After a successful restart the plugin appends a localized `已重启` / `Restarted`
-notice to the resumed conversation so it appears in the transcript like a
-normal message (a product requirement). It is **not** a zero-token operation in
-the strict sense: it is appended to the conversation **surface**
-(`surfaceOp: append`), so it may contribute to input context on later model
-turns — it just never triggers an LLM request of its own. It also uses a
-synthetic `assistant/message` (`turn: 0, step: 0`), which is a compatibility
-measure, not an officially supported assistant boundary. Tracked upstream:
-[deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802)
-(downstream plugins cannot persist their own non-surface events). The intended
-final design is a durable, non-surface `restart/completed` event rendered by a
-client `ConversationNodeDefinition`, which would keep it out of the model
-surface entirely.
+After a successful restart the plugin shows a small localized `已重启` /
+`Restarted` toast in the corner of the UI. This is **purely a UI notice**:
+nothing is written into any session log. (This replaced an earlier design that
+appended a synthetic `assistant/message` (`turn: 0, step: 0`) into the resumed
+conversation — that approach tripped the token-meter's step-pairing invariant
+and could corrupt large sessions, so it was removed. Tracked upstream:
+[deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802).)
+
+Mechanics:
+- On boot, if the restart marker was consumed, `/health` reports
+  `restarted: true, fromInstanceId: <old>`.
+- The client checks `/health` once after load; when `restarted` is true it
+  shows the toast, then ACKs via `POST /api/dsh-restart-button/notice-shown`
+  so a later refresh does not re-show it.
+- Because the confirmation never touches a session file, a restart can no
+  longer corrupt session logs or leave unpaired events behind.
 
 ## Development
 
