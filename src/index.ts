@@ -490,9 +490,11 @@ function scheduleRestartConfirmation(ctx): void {
     return
   }
   const pending = new Set(sessionIds)
-  let attempts = 0
+  // No hard timeout: a session may be reopened long after restart. Check
+  // periodically (cheap), inject the zero-token confirmation the moment its
+  // agent comes back live, and only then clear the marker. The interval
+  // unrefs so it never keeps the process alive on its own.
   const interval = setInterval(() => {
-    attempts += 1
     for (const sessionId of [...pending]) {
       let agent: { inject(msg: unknown): void } | undefined
       try {
@@ -515,11 +517,12 @@ function scheduleRestartConfirmation(ctx): void {
       }
       pending.delete(sessionId)
     }
-    if (pending.size === 0 || attempts >= 120) { // ~60s cap
+    if (pending.size === 0) {
       clearInterval(interval)
       clearResumeMarker()
     }
-  }, 500)
+  }, 2000)
+  interval.unref?.()
 }
 
 export function apply(ctx, config: Config) {
