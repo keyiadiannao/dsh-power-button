@@ -52,6 +52,24 @@ import path from 'node:path'
 export const name = 'dsh-restart-button'
 export const inject = ['webServer', 'tools']
 
+/** Plugin configuration (editable via the profile's cordis config / settings). */
+export interface Config {
+  /** Register the `restart_harness` model tool. Off by default: allowing the
+   * model to restart the whole harness is a higher-privilege action than the
+   * GUI power button, so it is opt-in. */
+  enableModelTool: boolean
+  /** Upper bound (ms) for the model tool's delayMs argument. */
+  maxDelayMs: number
+}
+
+function resolveConfig(ctx): Config {
+  const cfg = ctx.config as Partial<Config> | undefined
+  return {
+    enableModelTool: cfg?.enableModelTool ?? false,
+    maxDelayMs: cfg?.maxDelayMs ?? 5000,
+  }
+}
+
 const BASE = '/api/dsh-restart-button'
 const RUNTIME_DIR = path.join(os.homedir(), '.dsh')
 
@@ -175,9 +193,16 @@ function portFree(p) {
       windowsHide: true,
     })
     helper.unref()
-    // Schedule the old process to self-exit AFTER the HTTP response flushes.
+    // Schedule the old process to exit AFTER the HTTP response flushes.
+    // Prefer DSH's `ctx.appExit` (graceful tree dispose); fall back to
+    // process.exit in non-standard embeddings.
     setTimeout(() => {
-      try { process.exit(0) } catch { /* ignore */ }
+      const appExit = ctx.appExit
+      if (typeof appExit === 'function') {
+        appExit(0)
+      } else {
+        try { process.exit(0) } catch { /* ignore */ }
+      }
     }, delayMs)
     return { ok: true, action: 'restart', note: 'DeepSeek Harness 正在重启，约 10 秒后恢复' }
   } catch (e) {
@@ -186,22 +211,28 @@ function portFree(p) {
 }
 
 /**
- * Shut down DSH. Returns immediately; the process exits once the HTTP
- * response has actually finished flushing to the socket (res 'finish'),
- * so the client sees the ack before the connection drops — no fixed delay,
- * no perceived hang. Nothing relaunches — the user must start DSH again
- * manually.
+ * Shut down DSH gracefully. Prefers DSH's official `ctx.appExit` channel
+ * (launcher-provided), which disposes the plugin tree (sessions, watchers,
+ * subprocesses) with a bounded grace period instead of hard-killing via
+ * `process.exit`. Falls back to `process.exit` only when the launcher did
+ * not provide `appExit` (non-standard embedding).
+ *
+ * The exit is armed on THIS response's 'finish' so the client sees the ack
+ * before the connection drops. Nothing relaunches — the user must start DSH
+ * again manually.
  */
-function shutdownDsh(res) {
+function shutdownDsh(ctx, res) {
   try {
-    // Arm the exit on THIS response's 'finish' so process.exit runs right
-    // after the ack bytes leave the socket. Fallback: 500ms cap in case
-    // 'finish' never fires (e.g. client aborted mid-request).
     const exitSoon = (): void => {
-      try { process.exit(0) } catch { /* ignore */ }
+      const appExit = ctx.appExit
+      if (typeof appExit === 'function') {
+        appExit(0)
+      } else {
+        try { process.exit(0) } catch { /* ignore */ }
+      }
     }
     res.once('finish', exitSoon)
-    setTimeout(exitSoon, 500).unref()
+    setTimeout(exitSoon, 500).unref() // fallback if 'finish' never fires
     return { ok: true, action: 'shutdown', note: 'DeepSeek Harness 正在关机' }
   } catch (e) {
     return { ok: false, action: 'shutdown', error: e.message }
@@ -209,27 +240,49 @@ function shutdownDsh(res) {
 }
 
 /**
- * CSRF/same-origin guard for the destructive POST endpoints. These actions
- * kill the DSH process, so a malicious webpage must not be able to trigger
- * them cross-origin (a `fetch(..., { mode: 'no-cors' })` still sends the
- * request even though the response is unreadable). Accept only:
- *   - loopback client, AND
- *   - a same-origin `Origin` header (browser sends it on POST), OR no Origin
- *     at all (non-browser clients like curl — they cannot carry cookies that
- *     a browser would attach anyway).
- * `sec-fetch-site: cross-site` is an extra, non-authoritative hint: reject it
- * when present.
+ * Trust fence for the destructive POST endpoints. These actions kill the DSH
+ * process, so a malicious webpage must not trigger them cross-origin (a
+ * `fetch(..., { mode: 'no-cors' })` still sends the request even though the
+ * response is unreadable).
+ *
+ * Defense in depth — mirrors the official DSH browser-trust fence
+ * (`isTrustedApiRequest` in dsh-client-connection) without importing the
+ * client package:
+ *   1. Loopback socket check — the request must arrive on 127.0.0.1/::1.
+ *   2. Host-header fence (DNS-rebinding defense): Host must be loopback or a
+ *      bare 127.0.0.1 authority — a rebound page carries the attacker's
+ *      domain in Host even though the socket lands here.
+ *   3. Cross-site fence: an explicit `sec-fetch-site: cross-site` is refused.
+ *   4. Origin fence: when a browser attaches Origin it must equal Host
+ *      (normalized); absent Origin is fine (curl/non-browser — Host already
+ *      bound the request).
+ *
+ * NOTE: our `/api/dsh-restart-button/*` prefix is LONGER than the official
+ * `/api` route, so webServer's longest-prefix-wins matching means these
+ * requests never pass through the official fence automatically — this guard
+ * is the only line of defense for them.
  */
 function isTrustedPowerRequest(req): boolean {
   const address = req.socket?.remoteAddress
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
-  const { origin, host, 'sec-fetch-site': secFetchSite } = req.headers
-  if (typeof secFetchSite === 'string' && secFetchSite === 'cross-site') return false
-  if (origin === undefined) return true // non-browser client
-  if (typeof origin !== 'string' || typeof host !== 'string') return false
+  const { host, origin, 'sec-fetch-site': secFetchSite } = req.headers
+  // Host fence: Host must be a loopback authority (we only serve loopback).
+  if (typeof host !== 'string') return false
+  let hostUrl: URL
   try {
-    const parsed = new URL(origin)
-    return (parsed.protocol === 'http:' || parsed.protocol === 'https:') && parsed.host === host
+    hostUrl = new URL(`http://${host}`)
+  } catch {
+    return false
+  }
+  const hn = hostUrl.hostname
+  if (hn !== '127.0.0.1' && hn !== '::1' && hn !== '[::1]' && hn !== 'localhost') return false
+  // Cross-site fence.
+  if (typeof secFetchSite === 'string' && secFetchSite === 'cross-site') return false
+  // Origin fence: present Origin must equal Host; "null" origin refused.
+  if (origin === undefined) return true
+  if (typeof origin !== 'string' || origin === 'null') return false
+  try {
+    return new URL(origin).host === hostUrl.host
   } catch {
     return false
   }
@@ -279,7 +332,7 @@ export function apply(ctx) {
           if (!claimPowerTransition('shutdown')) {
             return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition}` })
           }
-          const result = shutdownDsh(res)
+          const result = shutdownDsh(ctx, res)
           if (!result.ok) releasePowerTransition()
           return json(res, result.ok ? 200 : 500, result)
         }
@@ -295,56 +348,67 @@ export function apply(ctx) {
   }), 'dsh-restart-button: http routes')
 
   // Model tool: same name as anweat/dsh-restart's `restart_harness` so this
-  // plugin stands in for it. Skip silently when another plugin already owns
-  // the name (both installed) — the first registrant wins.
-  try {
-    ctx.tools.register({
-      name: 'restart_harness',
-      description:
-        '重启整个 DeepSeek Harness 进程，用于重新加载插件与配置（profile 的 cordis 组合、settings 等）。'
-        + '由 dsh-restart-button 提供（独立实现）：派生一个 detach 的 helper，'
-        + '在旧进程退出并释放端口后以原命令行在原目录重新拉起，然后旧进程退出。'
-        + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
-        + '返回旧进程 pid、cwd、命令行与日志文件路径。',
-      parameters: {
-        type: 'object',
-        properties: {
-          delayMs: { type: 'number', description: '旧进程退出前等待的毫秒数（给当前结果留出回传时间），默认 2000。' },
+  // plugin stands in for it. Off by default (config.enableModelTool) —
+  // letting the model restart the whole harness is a higher-privilege action
+  // than the GUI button, so it is opt-in. Skip silently when another plugin
+  // already owns the name (both installed) — the first registrant wins.
+  const cfg = resolveConfig(ctx)
+  if (cfg.enableModelTool) {
+    try {
+      ctx.tools.register({
+        name: 'restart_harness',
+        description:
+          '重启整个 DeepSeek Harness 进程，用于重新加载插件与配置（profile 的 cordis 组合、settings 等）。'
+          + '由 dsh-restart-button 提供（独立实现）：派生一个 detach 的 helper，'
+          + '在旧进程退出并释放端口后以原命令行在原目录重新拉起，然后旧进程退出。'
+          + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
+          + '返回旧进程 pid、cwd、命令行与日志文件路径。',
+        parameters: {
+          type: 'object',
+          properties: {
+            delayMs: {
+              type: 'number',
+              description: `旧进程退出前等待的毫秒数（给当前结果留出回传时间），默认 2000，上限 ${cfg.maxDelayMs}。`,
+            },
+          },
         },
-      },
-      output: {
-        // NOTE: `type: 'json'` is an author-only spec value — raw
-        // `ctx.tools.register` feeds the schema straight to
-        // assertSupportedJsonSchema, which only knows
-        // object/array/string/number/integer/boolean/null and would throw.
-        // An empty schema (annotation-only) accepts any JSON value.
-        schema: {},
-        render(_args, value) {
-          return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
+        output: {
+          // NOTE: `type: 'json'` is an author-only spec value — raw
+          // `ctx.tools.register` feeds the schema straight to
+          // assertSupportedJsonSchema, which only knows
+          // object/array/string/number/integer/boolean/null and would throw.
+          // An empty schema (annotation-only) accepts any JSON value.
+          schema: {},
+          render(_args, value) {
+            return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
+          },
         },
-      },
-      async execute(args) {
-        const a = (args ?? {}) as { delayMs?: number }
-        const delayMs = Number(a.delayMs) > 0 ? Math.floor(Number(a.delayMs)) : 2000
-        // Same at-most-once latch as the HTTP endpoints: the model tool and a
-        // concurrent UI click must not spawn two helpers.
-        if (!claimPowerTransition('restart')) {
-          return { ok: false, error: `power transition already in progress: ${powerTransition}` }
-        }
-        const result = restartDsh(ctx, delayMs)
-        if (!result.ok) releasePowerTransition()
-        return result
-      },
-    })
-  } catch (error) {
-    // "already registered" — anweat/dsh-restart owns the name; our UI and
-    // endpoints remain, the model uses theirs. Not an error.
-    if (String(error).includes('already registered')) {
-      try {
-        fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} restart_harness already registered by another plugin; skipping our tool\n`)
-      } catch { /* ignore */ }
-    } else {
-      throw error
+        async execute(args) {
+          const a = (args ?? {}) as { delayMs?: number }
+          const raw = Number(a.delayMs)
+          const clamped = Number.isFinite(raw) && raw > 0
+            ? Math.min(Math.floor(raw), cfg.maxDelayMs)
+            : 2000
+          // Same at-most-once latch as the HTTP endpoints: the model tool and
+          // a concurrent UI click must not spawn two helpers.
+          if (!claimPowerTransition('restart')) {
+            return { ok: false, error: `power transition already in progress: ${powerTransition}` }
+          }
+          const result = restartDsh(ctx, clamped)
+          if (!result.ok) releasePowerTransition()
+          return result
+        },
+      })
+    } catch (error) {
+      // "already registered" — anweat/dsh-restart owns the name; our UI and
+      // endpoints remain, the model uses theirs. Not an error.
+      if (String(error).includes('already registered')) {
+        try {
+          fs.appendFileSync(LOG_FILE, `${new Date().toISOString()} restart_harness already registered by another plugin; skipping our tool\n`)
+        } catch { /* ignore */ }
+      } else {
+        throw error
+      }
     }
   }
 }
