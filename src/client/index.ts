@@ -12,6 +12,7 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { RestartButton } from './RestartButton.tsx'
+import { RestartNotice } from './RestartNotice.tsx'
 import { RestartOverlay } from './RestartOverlay.tsx'
 import { en, zh } from './locales.ts'
 
@@ -297,4 +298,14 @@ export function apply(ctx: ClientContext): void {
       id: 'dsh-restart-overlay',
       locale: NS,
     }, RestartOverlay))
+
+  // UI-only "已重启" toast: shown once after a restart via /health's
+  // `restarted` flag. Lives in the same additive overlay slot; unlike the
+  // old session-injected assistant message it never touches a session file.
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register({
+      name: 'shell.overlay',
+      id: 'dsh-restart-notice',
+      locale: NS,
+    }, RestartNotice))
 }

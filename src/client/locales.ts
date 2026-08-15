@@ -11,6 +11,11 @@ export const zh = {
   restartHint: '重新启动 DeepSeek Harness',
   shutdown: '关机',
   shutdownHint: '停止 DeepSeek Harness，之后需手动启动',
+  // shutdown confirm dialog (irreversible — confirm before going down)
+  shutdownConfirmTitle: '确定要关机吗？',
+  shutdownConfirmBody: '关机后 DeepSeek Harness 将停止运行，需要你手动重新启动。',
+  confirmShutdown: '关机',
+  cancel: '取消',
   // overlay — restart
   restartDialog: '重启 DeepSeek Harness',
   restartClosing: '正在关闭 DeepSeek Harness…',
@@ -37,6 +42,9 @@ export const zh = {
   shutdownNoEffect: '未检测到 DSH 进程关闭，请手动确认',
   retry: '重试',
   close: '关闭',
+  // toast — restart complete (UI-only, never written into the session log)
+  restartedToast: '已重启',
+  restartedToastSub: 'DeepSeek Harness 已重启完成',
 } as const
 
 export const en = {
@@ -46,6 +54,11 @@ export const en = {
   restartHint: 'Restart DeepSeek Harness',
   shutdown: 'Shutdown',
   shutdownHint: 'Stop DeepSeek Harness; start it manually when needed',
+  // shutdown confirm dialog (irreversible — confirm before going down)
+  shutdownConfirmTitle: 'Shut down DeepSeek Harness?',
+  shutdownConfirmBody: 'After shutdown the process stops and you must start it manually.',
+  confirmShutdown: 'Shut down',
+  cancel: 'Cancel',
   // overlay — restart
   restartDialog: 'Restart DeepSeek Harness',
   restartClosing: 'Shutting down DeepSeek Harness…',
@@ -72,4 +85,7 @@ export const en = {
   shutdownNoEffect: 'Could not confirm DSH shut down; please check manually',
   retry: 'Retry',
   close: 'Close',
+  // toast — restart complete (UI-only, never written into the session log)
+  restartedToast: 'Restarted',
+  restartedToastSub: 'DeepSeek Harness restarted successfully',
 } as const

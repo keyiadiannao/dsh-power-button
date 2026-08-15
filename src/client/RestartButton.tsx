@@ -21,6 +21,9 @@ const MENU_W = 220
 export function RestartButton(props: RestartButtonProps): JSX.Element {
   const { t } = props
   const [open, setOpen] = useState(false)
+  // Shutdown is irreversible (the process exits and must be started manually),
+  // so it always passes through a confirm dialog before beginPower('shutdown').
+  const [confirming, setConfirming] = useState(false)
   const btnRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
 
@@ -61,7 +64,12 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
 
   const pick = (action: 'restart' | 'shutdown'): void => {
     setOpen(false)
-    beginPower(action)
+    if (action === 'shutdown') {
+      // Irreversible — require explicit confirmation in a dialog.
+      setConfirming(true)
+      return
+    }
+    beginPower('restart')
   }
 
   // Anchor the menu above the button, right-aligned to its right edge.
@@ -168,6 +176,21 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
           />
         </div>
       ) : null}
+
+      {/* Shutdown confirm dialog: irreversible action, explicit second step. */}
+      {confirming ? (
+        <ShutdownConfirm
+          title={t('shutdownConfirmTitle')}
+          body={t('shutdownConfirmBody')}
+          confirmLabel={t('confirmShutdown')}
+          cancelLabel={t('cancel')}
+          onConfirm={() => {
+            setConfirming(false)
+            beginPower('shutdown')
+          }}
+          onCancel={() => setConfirming(false)}
+        />
+      ) : null}
     </>
   )
 }
@@ -209,5 +232,112 @@ function MenuItem({ label, title, onClick, glyph }: {
       {glyph}
       <span style={{ display: 'block', lineHeight: '22px', whiteSpace: 'nowrap', flex: 'none' }}>{label}</span>
     </button>
+  )
+}
+
+/** Modal confirm dialog for the irreversible shutdown action. */
+function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConfirm, onCancel }: {
+  title: string
+  body: string
+  confirmLabel: string
+  cancelLabel: string
+  onConfirm: () => void
+  onCancel: () => void
+}): JSX.Element {
+  const confirmRef = useRef<HTMLButtonElement | null>(null)
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === 'Escape') onCancel()
+  }
+  useEffect(() => {
+    // Focus the confirm button on open; Esc cancels.
+    confirmRef.current?.focus()
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onMouseDown={(e) => {
+        // Click on the veil (outside the card) cancels.
+        if (e.target === e.currentTarget) onCancel()
+      }}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1600,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'var(--dsw-alias-bg-mask-2, rgba(0,0,0,0.4))',
+        backdropFilter: 'blur(2px)',
+        WebkitBackdropFilter: 'blur(2px)',
+        fontFamily: 'var(--dsw-font-family, ui-sans-serif, system-ui, sans-serif)',
+      }}
+    >
+      <div
+        style={{
+          width: 320,
+          boxSizing: 'border-box',
+          padding: '20px 22px 18px',
+          borderRadius: 14,
+          background: 'var(--dsw-alias-bg-layer-2, rgba(24,28,38,0.98))',
+          border: '1px solid var(--dsw-alias-border-l3, rgba(196,211,232,0.31))',
+          boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
+          color: 'var(--dsw-alias-label-primary, #f2f6fc)',
+        }}
+      >
+        <div style={{ fontSize: 15, fontWeight: 650, lineHeight: 1.4, marginBottom: 8 }}>
+          {title}
+        </div>
+        <div style={{ fontSize: 13, lineHeight: 1.6, color: 'var(--dsw-alias-label-secondary, rgba(242,246,252,0.7))', marginBottom: 18 }}>
+          {body}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+          <button
+            type="button"
+            onClick={onCancel}
+            style={{
+              padding: '7px 16px',
+              borderRadius: 8,
+              border: '1px solid var(--dsw-alias-border-l3, rgba(196,211,232,0.31))',
+              background: 'transparent',
+              color: 'var(--dsw-alias-label-primary, #f2f6fc)',
+              font: 'inherit',
+              fontSize: 13,
+              cursor: 'pointer',
+            }}
+          >
+            {cancelLabel}
+          </button>
+          <button
+            ref={confirmRef}
+            type="button"
+            onClick={onConfirm}
+            style={{
+              padding: '7px 16px',
+              borderRadius: 8,
+              border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 55%, transparent)',
+              // Danger button fill: mix the error primary at a low ratio into
+              // the surface (official DSH pattern) instead of using the solid
+              // error-secondary — in dark mode error-primary and
+              // error-secondary are the SAME bright red, so a solid secondary
+              // background would make the text unreadable.
+              background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 16%, var(--dsw-alias-bg-layer-2, rgba(24,28,38,0.98)))',
+              color: 'var(--dsw-alias-state-error-primary, #ff8592)',
+              font: 'inherit',
+              fontSize: 13,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }

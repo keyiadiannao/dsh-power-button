@@ -46,13 +46,17 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
+import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
-import { createAssistantMessage } from '@deepseek-ai/dsh-llm'
+
+/** Plugin version, read from package.json so /health can report it. */
+const require = createRequire(import.meta.url)
+const PLUGIN_VERSION = (require('../package.json') as { version?: string }).version ?? '0.0.0'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools', 'commands', 'agents', 'sessions', 'sessionPersistence', 'settings']
+export const inject = ['webServer', 'tools', 'commands', 'sessions', 'settings']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -81,15 +85,10 @@ function dshHome(): string {
 }
 const RUNTIME_DIR = dshHome()
 
-/** Per-instance marker paths (keyed by port). */
-function resumeMarkerPath(): string {
-  return path.join(RUNTIME_DIR, `dsh-restart-resume-${CURRENT_PORT}.json`)
-}
-
 /** Port this instance serves, resolved at apply time. Markers are keyed by
  * port so concurrent instances (e.g. :3080 and :3081) never read each other's
- * restart/resume markers — otherwise instance B would consume instance A's
- * marker and wrongly report "restarted from A". */
+ * restart markers — otherwise instance B would consume instance A's marker
+ * and wrongly report "restarted from A". */
 let CURRENT_PORT = 3080
 
 /** Per-port marker path. Exported for tests (isolated via DSH_HOME). */
@@ -151,43 +150,6 @@ export function consumeRestartConfirmation(): { fromInstanceId: string } | null 
   // then a manual C boot must NOT report "restarted from A".
   try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
   return { fromInstanceId: oldId }
-}
-
-/** Session ids that were live (open) at restart time. Recording every live
- * session — not only agents currently mid-turn — makes the "已重启"
- * confirmation appear even when the restarted session's agent happened to be
- * idle at the moment of the restart (e.g. a GUI-button restart while the
- * conversation is quiet, or a message that arrived just before the exit). */
-function runningSessionIds(ctx): string[] {
-  try {
-    const live = ctx.sessions.list().map((session) => String(session.id))
-    const running = ctx.agents.roots()
-      .filter((agent: { status?: string }) => agent.status === 'running')
-      .map((agent: { id: unknown }) => String(agent.id))
-    return [...new Set([...live, ...running])]
-  } catch {
-    return []
-  }
-}
-
-function writeResumeMarker(sessionIds: string[]): void {
-  try {
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
-    fs.writeFileSync(resumeMarkerPath(), JSON.stringify({ sessionIds, at: new Date().toISOString() }), { encoding: 'utf8', mode: 0o600 })
-  } catch { /* best-effort */ }
-}
-
-function readResumeMarker(): string[] {
-  try {
-    const j = JSON.parse(fs.readFileSync(resumeMarkerPath(), 'utf8')) as { sessionIds?: string[] }
-    return Array.isArray(j.sessionIds) ? j.sessionIds : []
-  } catch {
-    return []
-  }
-}
-
-function clearResumeMarker(): void {
-  try { fs.unlinkSync(resumeMarkerPath()) } catch { /* already gone */ }
 }
 
 /**
@@ -279,14 +241,30 @@ export function pruneOldRestartLogs(maxAgeDays = 7): void {
   } catch { /* ignore */ }
 }
 
-// Boot-time breadcrumb: record how THIS process was invoked so the relaunch
-// derivation can be verified against reality (execArgv vs argv split). The
-// command line can carry credentials, so every part goes through the
-// redactor before it touches the log.
+/** Boot breadcrumb with an ALLOWLIST of diagnostic fields only. The full
+ * argv is never logged: plugin CLI args can carry credentials (--api-key
+ * sk-xxx etc), and even a good redactor is one regex away from leaking a
+ * value. Keep execPath/script/port/profile/pid/cwd-basename only. */
+function bootBreadcrumb(): string {
+  const argv = process.argv
+  const portIndex = argv.indexOf('--port')
+  const profileIndex = argv.indexOf('--profile')
+  const script = argv.find(a => /(^|[\\/])bin\.(ts|js)$/.test(a)) ?? argv[1] ?? ''
+  return [
+    `pid=${process.pid}`,
+    `execPath=${process.execPath}`,
+    `script=${script}`,
+    profileIndex > 0 ? `profile=${argv[profileIndex + 1] ?? ''}` : '',
+    portIndex > 0 ? `port=${argv[portIndex + 1] ?? ''}` : '',
+    `cwd=${path.basename(process.cwd())}`,
+  ].filter(Boolean).join(' ')
+}
+
+// Boot-time breadcrumb: record the invocation allowlist so relaunch
+// derivation can be checked against reality, without ever logging argv.
 try {
   fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
-  appendLog(LOG_FILE,
-    `${new Date().toISOString()} loaded execArgv=${redactCommandLine(process.execArgv)} argv=${redactCommandLine(process.argv)} cwd=${process.cwd()}\n`)
+  appendLog(LOG_FILE, `${new Date().toISOString()} loaded ${bootBreadcrumb()}\n`)
 } catch { /* ignore */ }
 
 /**
@@ -299,9 +277,6 @@ function restartDsh(ctx, delayMs = 1500) {
     // Record restart intent: the new process reads this to confirm it IS the
     // restarted instance (its own instanceId differs from the recorded old).
     writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
-    // Record mid-turn sessions so the new instance can auto-confirm the
-    // restart in the resumed conversation.
-    writeResumeMarker(runningSessionIds(ctx))
     // Replay the CURRENT invocation, portably (no hard-coded paths):
     // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
     // script + app args. Spawned children inherit env, so any NODE_OPTIONS
@@ -321,6 +296,7 @@ const OLD_INSTANCE = ${JSON.stringify(INSTANCE_ID)};
 const MARKER = ${JSON.stringify(markerPath())};
 const LOG = ${JSON.stringify(LOG_FILE)};
 const SERVER_LOG = ${JSON.stringify(serverLog)};
+const SESSIONS_ROOT = ${JSON.stringify(path.join(RUNTIME_DIR, 'sessions'))};
 function log(m) {
   try { fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\\n'); } catch {}
 }
@@ -332,6 +308,47 @@ function portFree(p) {
     const s = net.createConnection({ host: '127.0.0.1', port: p });
     s.once('connect', () => { s.destroy(); resolve(false); });
     s.once('error', () => resolve(true));
+  });
+}
+// Durable-write quiescence check: the OLD process may still be draining its
+// session write-behind buffer after its main loop exits (a message or a
+// tool/result landing just before the exit). Relaunching before that drain
+// finishes lets the NEW process read a file the old one is still appending
+// to, and its first writes then interleave stale seq numbers onto the same
+// log — the corruption that repeatedly broke sessions. So after the old pid
+// is gone and the port is free, poll every session log's (size, mtimeMs)
+// until two consecutive samples are identical: only then is the disk quiescent.
+// Bounded (~15s): never block the restart forever on a stuck writer.
+function sessionsQuiescent(maxWaitMs) {
+  const nodePath = require('node:path');
+  const walk = (dir, out) => {
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = dir + nodePath.sep + e.name;
+      if (e.isDirectory()) walk(p, out);
+      else if (/session\.jsonl/.test(e.name)) {
+        try {
+          const s = fs.statSync(p);
+          out.push(p + ':' + s.size + ':' + Math.floor(s.mtimeMs));
+        } catch {}
+      }
+    }
+  };
+  const stamp = () => { const out = []; walk(SESSIONS_ROOT, out); return out.sort().join('|'); };
+  const deadline = Date.now() + maxWaitMs;
+  let prev = stamp();
+  return new Promise((resolve) => {
+    const tick = () => {
+      setTimeout(() => {
+        if (Date.now() >= deadline) return resolve(false);
+        const cur = stamp();
+        if (cur === prev) return resolve(true);
+        prev = cur;
+        tick();
+      }, 400);
+    };
+    tick();
   });
 }
 (async () => {
@@ -350,6 +367,12 @@ function portFree(p) {
   }
   if (!freed) { log('port never freed - giving up'); cleanup(); return; }
   await new Promise((r) => setTimeout(r, 500)); // settle: let the socket fully release
+  // Wait for the old process's session write-behind to drain completely
+  // (durable files stable) before the new process touches them. This closes
+  // the restart-time corruption window: the new instance must never read a
+  // session file the old one is still appending to.
+  const quiescent = await sessionsQuiescent(15000);
+  log(quiescent ? 'session logs quiescent' : 'session logs still moving after 15s - proceeding anyway');
   log('relaunching: ' + relaunch.join(' ').replace(/((?:api[_-]?key|token|secret|password|auth)=?)[^\s]+/ig, '$1***'));
   const out = fs.openSync(SERVER_LOG, 'a');
   // spawn() reports many failures asynchronously ('error'), not synchronously;
@@ -599,113 +622,11 @@ function isEnglishLocale(ctx): boolean {
   return false
 }
 
-/** The restart confirmation text, matched to the UI language. Falls back to
- * Chinese when the settings service is unavailable or the preference is
- * unknown. */
-function restartConfirmationText(ctx): string {
-  return isEnglishLocale(ctx) ? 'Restarted' : '已重启'
-}
-
-function scheduleRestartConfirmation(ctx): void {
-  const sessionIds = readResumeMarker()
-  if (sessionIds.length === 0) {
-    clearResumeMarker()
-    return
-  }
-  const confirmation = restartConfirmation
-  if (confirmation === null) {
-    clearResumeMarker()
-    return
-  }
-  const pending = new Set(sessionIds)
-  const attempts = new Map<string, number>()
-  const interval = setInterval(() => {
-    void (async () => {
-      for (const sessionId of [...pending]) {
-        let session: { header: unknown; append(type: 'assistant/message', data: unknown, opts?: unknown): unknown } | undefined
-        try {
-          session = ctx.sessions.get(sessionId)
-        } catch { /* store unavailable */ }
-        if (session === undefined) continue
-        // Stability fence: the durable file must stop changing before we
-        // write into it. A predecessor still draining its write-behind
-        // buffer (user message racing the exit) keeps appending; writing
-        // here mid-flight would interleave seq numbers on the same log.
-        let stable = true
-        try {
-          const sp = ctx.sessionPersistence
-          const location = sp !== undefined && typeof sp.locate === 'function'
-            ? sp.locate(session.header)
-            : undefined
-          if (location !== undefined && typeof location.path === 'string') {
-            const stamp = (): string | undefined => {
-              try {
-                const s = fs.statSync(location.path)
-                return `${s.size}:${s.mtimeMs}`
-              } catch { return undefined }
-            }
-            const a = stamp()
-            await new Promise((r) => setTimeout(r, 400))
-            stable = a !== undefined && a === stamp()
-          }
-        } catch { /* verification unavailable → proceed */ }
-        if (!stable) {
-          const n = (attempts.get(sessionId) ?? 0) + 1
-          attempts.set(sessionId, n)
-          if (n >= 15) {
-            pending.delete(sessionId)
-            try {
-              appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation skipped for ${sessionId}: file never stabilized\n`)
-            } catch { /* ignore */ }
-          }
-          continue
-        }
-        try {
-          // TEMPORARY compatibility path (product requirement: the restart
-          // notice must appear in the transcript like a normal message).
-          // This appends a synthetic assistant/message to the conversation
-          // SURFACE, which means it may contribute to input context on
-          // subsequent model turns — it is NOT strictly zero-token, and
-          // turn:0/step:0 is not an officially supported assistant step
-          // boundary. Tracked upstream:
-          //   deepseek-ai/DeepSeek-Harness#802 — downstream plugins cannot
-          //   persist their own non-surface events. Once DSH supports
-          //   `ignorable` log-only events, migrate to
-          //   `restart/completed` (durable, non-surface) + a client
-          //   ConversationNodeDefinition rendering the transcript row.
-          session.append('assistant/message', {
-            turn: 0,
-            step: 0,
-            message: createAssistantMessage({
-              content: [{ type: 'text', text: restartConfirmationText(ctx) }],
-              // Model source: renders as an ordinary AI reply with no
-              // plugin/form provenance labels. Host-inserted notice, NOT a
-              // real model turn — no LLM request is issued for it.
-              source: { provider: 'dsh-restart-button', model: 'restart-confirmation' },
-            }),
-          }, { surfaceOp: 'append' })
-          try { await ctx.sessions.flush(session) } catch { /* best-effort */ }
-        } catch (error) {
-          try {
-            appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmation append failed for ${sessionId}: ${String(error)}\n`)
-          } catch { /* ignore */ }
-        }
-        pending.delete(sessionId)
-      }
-      if (pending.size === 0) {
-        clearInterval(interval)
-        clearResumeMarker()
-      }
-    })()
-  }, 1000)
-  interval.unref?.()
-}
-
 export function apply(ctx, config: Config) {
   // Startup housekeeping: prune stale restart-helper logs from previous runs.
   pruneOldRestartLogs()
   // Resolve THIS instance's port first: markers are keyed by port so
-  // concurrent instances never read each other's restart/resume markers.
+  // concurrent instances never read each other's restart markers.
   CURRENT_PORT = resolvePort(ctx)
   // If the restart marker names a DIFFERENT previous instance, this process
   // is the freshly-relaunched one — record it for /health confirmation.
@@ -714,11 +635,10 @@ export function apply(ctx, config: Config) {
     try {
       appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${restartConfirmation.fromInstanceId} thisInstanceId=${INSTANCE_ID}\n`)
     } catch { /* ignore */ }
-    // Auto-confirm in the resumed conversation: once the recorded sessions'
-    // agents come back live after the client reopens them, inject a visible
-    // "restart complete" message (with the from→to instance ids) so the user
-    // or agent does NOT need to query /health manually.
-    scheduleRestartConfirmation(ctx)
+    // The confirmation is now UI-only: the client shows a "已重启" toast
+    // when /health reports `restarted: true` (see src/client/RestartNotice.tsx).
+    // Nothing is written into any session log, so a restart can never corrupt
+    // a session file or trip the token-meter step-pairing invariant.
   }
 
   ctx.effect(() => ctx.webServer.register({
@@ -750,12 +670,25 @@ export function apply(ctx, config: Config) {
           return json(res, result.ok ? 200 : 500, result)
         }
         if (sub === '/health' && req.method === 'GET') {
-          const body: Record<string, unknown> = { ok: true, instanceId: INSTANCE_ID }
+          const body: Record<string, unknown> = {
+            ok: true,
+            instanceId: INSTANCE_ID,
+            pluginVersion: PLUGIN_VERSION,
+            lifecycle: powerTransition ?? (restartConfirmation !== null ? 'restarted' : 'ready'),
+          }
           if (restartConfirmation !== null) {
             body.restarted = true
             body.fromInstanceId = restartConfirmation.fromInstanceId
           }
           return json(res, 200, body)
+        }
+        if (sub === '/notice-shown' && req.method === 'POST') {
+          // UI-only confirmation lifecycle: the client displays the "已重启"
+          // toast once (from /health's `restarted` flag), then ACKs here so
+          // a later page refresh does not re-show it. Idempotent: no marker
+          // is persisted, only the in-memory confirmation is cleared.
+          restartConfirmation = null
+          return json(res, 200, { ok: true, action: 'notice-shown' })
         }
         json(res, 404, { ok: false, error: `no dsh-restart-button endpoint ${sub}` })
       } catch (e) {
@@ -840,25 +773,37 @@ export function apply(ctx, config: Config) {
   // Command-bar entries, self-contained (no anweat/dsh-restart needed):
   // `/restart` and `/shutdown` share the same at-most-once latch as the UI
   // and the model tool, so a command cannot race a button click.
+  // Each registration tolerates a name collision (another plugin may own
+  // `restart`): a conflict logs and skips instead of crashing the boot.
   ctx.effect(() => {
     const en = isEnglishLocale(ctx)
-    ctx.commands.register({
-      name: 'restart',
-      description: en
-        ? 'Restart DeepSeek Harness (reload plugins & config)'
-        : '重启 DeepSeek Harness（重载插件与配置）',
-      recordInput: false,
-      async handler() {
-        if (!claimPowerTransition('restart')) {
-          return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
-        }
-        const result = restartDsh(ctx)
-        if (!result.ok) releasePowerTransition()
-        return result.ok
-          ? { kind: 'success', text: result.note }
-          : { kind: 'error', text: result.error ?? (en ? 'restart failed' : '重启失败') }
-      },
-    })
+    try {
+      ctx.commands.register({
+        name: 'restart',
+        description: en
+          ? 'Restart DeepSeek Harness (reload plugins & config)'
+          : '重启 DeepSeek Harness（重载插件与配置）',
+        recordInput: false,
+        async handler() {
+          if (!claimPowerTransition('restart')) {
+            return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
+          }
+          const result = restartDsh(ctx)
+          if (!result.ok) releasePowerTransition()
+          return result.ok
+            ? { kind: 'success', text: result.note }
+            : { kind: 'error', text: result.error ?? (en ? 'restart failed' : '重启失败') }
+        },
+      })
+    } catch (error) {
+      if (String(error).includes('already registered')) {
+        try {
+          appendLog(LOG_FILE, `${new Date().toISOString()} command "restart" already registered by another plugin; skipping ours\n`)
+        } catch { /* ignore */ }
+      } else {
+        throw error
+      }
+    }
     ctx.commands.register({
       name: 'shutdown',
       description: en
