@@ -48,9 +48,10 @@ import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { z } from '@deepseek-ai/schemastery'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools', 'config']
+export const inject = ['webServer', 'tools']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -62,13 +63,11 @@ export interface Config {
   maxDelayMs: number
 }
 
-function resolveConfig(ctx): Config {
-  const cfg = ctx.config as Partial<Config> | undefined
-  return {
-    enableModelTool: cfg?.enableModelTool ?? false,
-    maxDelayMs: cfg?.maxDelayMs ?? 5000,
-  }
-}
+/** Schemastery schema; cordis validates and provides it as apply(ctx, config). */
+export const Config: z<Config> = z.object({
+  enableModelTool: z.boolean().default(false),
+  maxDelayMs: z.number().default(5000),
+})
 
 const BASE = '/api/dsh-restart-button'
 
@@ -353,7 +352,7 @@ function releasePowerTransition(): void {
   powerTransition = null
 }
 
-export function apply(ctx) {
+export function apply(ctx, config: Config) {
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: BASE,
@@ -398,7 +397,7 @@ export function apply(ctx) {
   // letting the model restart the whole harness is a higher-privilege action
   // than the GUI button, so it is opt-in. Skip silently when another plugin
   // already owns the name (both installed) — the first registrant wins.
-  const cfg = resolveConfig(ctx)
+  const cfg = config
   if (cfg.enableModelTool) {
     try {
       ctx.tools.register({
