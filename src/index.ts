@@ -51,7 +51,7 @@ import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 
 export const name = 'dsh-restart-button'
-export const inject = ['webServer', 'tools']
+export const inject = ['webServer', 'tools', 'commands']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -277,8 +277,17 @@ function shutdownDsh(ctx, res) {
         try { process.exit(0) } catch { /* ignore */ }
       }
     }
-    res.once('finish', exitSoon)
-    setTimeout(exitSoon, 500).unref() // fallback if 'finish' never fires
+    if (res !== undefined && typeof res.once === 'function') {
+      // HTTP path: exit on THIS response's 'finish' so the client sees the
+      // ack before the connection drops. 500ms fallback if 'finish' never
+      // fires (e.g. client aborted).
+      res.once('finish', exitSoon)
+      setTimeout(exitSoon, 500).unref()
+    } else {
+      // Command path: no response object; exit after a short beat so the
+      // command result flushes.
+      setTimeout(exitSoon, 300).unref()
+    }
     return { ok: true, action: 'shutdown', note: 'DeepSeek Harness 正在关机' }
   } catch (e) {
     return { ok: false, action: 'shutdown', error: e.message }
@@ -457,4 +466,40 @@ export function apply(ctx, config: Config) {
       }
     }
   }
+
+  // Command-bar entries, self-contained (no anweat/dsh-restart needed):
+  // `/restart` and `/shutdown` share the same at-most-once latch as the UI
+  // and the model tool, so a command cannot race a button click.
+  ctx.effect(() => {
+    ctx.commands.register({
+      name: 'restart',
+      description: '重启 DeepSeek Harness（重载插件与配置）',
+      recordInput: false,
+      async handler() {
+        if (!claimPowerTransition('restart')) {
+          return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
+        }
+        const result = restartDsh(ctx)
+        if (!result.ok) releasePowerTransition()
+        return result.ok
+          ? { kind: 'text', text: result.note }
+          : { kind: 'error', text: result.error ?? '重启失败' }
+      },
+    })
+    ctx.commands.register({
+      name: 'shutdown',
+      description: '关机 DeepSeek Harness（停止进程，需手动重新启动）',
+      recordInput: false,
+      async handler() {
+        if (!claimPowerTransition('shutdown')) {
+          return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
+        }
+        const result = shutdownDsh(ctx, undefined)
+        if (!result.ok) releasePowerTransition()
+        return result.ok
+          ? { kind: 'text', text: result.note }
+          : { kind: 'error', text: result.error ?? '关机失败' }
+      },
+    })
+  }, 'dsh-restart-button: commands')
 }
