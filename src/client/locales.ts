@@ -12,7 +12,8 @@ export const zh = {
   shutdown: '关机',
   shutdownHint: '停止 DeepSeek Harness，之后需手动启动',
   // shutdown confirm dialog (irreversible — confirm before going down)
-  shutdownConfirmTitle: '确定要关机吗？',
+  // Question-form title: reads as a confirmation prompt, not a page heading.
+  shutdownConfirmTitle: '关闭 DeepSeek Harness？',
   shutdownConfirmBody: '关机后 DeepSeek Harness 将停止运行，需要你手动重新启动。',
   confirmShutdown: '关机',
   cancel: '取消',
