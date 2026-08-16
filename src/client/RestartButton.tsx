@@ -74,17 +74,21 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
   }
 
   // Anchor the menu above the button, right-aligned to its right edge.
-  // Menu height: 6px padding top + 36px item + 36px item + 6px padding bottom
-  // = 84px. Offset by the full height so the menu never overlaps the button.
-  const MENU_H = 84
+  // No hardcoded menu height: measure the rendered menu via menuRef and offset
+  // by its ACTUAL height, so it never overlaps the button regardless of item
+  // count, wrapping, or font scaling. Width is responsive: at least 16px gutter
+  // on narrow viewports, capped at the menu's comfortable width.
   const anchor = (): React.CSSProperties => {
     const r = btnRef.current?.getBoundingClientRect()
     if (!r) return { display: 'none' }
+    const m = menuRef.current?.getBoundingClientRect()
+    const menuW = Math.min(MENU_W, Math.max(0, window.innerWidth - 16))
+    const menuH = m?.height ?? 84
     return {
       position: 'fixed',
-      left: Math.max(8, r.right - MENU_W),
-      top: Math.max(8, r.top - 8 - MENU_H),
-      width: MENU_W,
+      left: Math.max(8, r.right - menuW),
+      top: Math.max(8, r.top - 8 - menuH),
+      width: menuW,
     }
   }
 

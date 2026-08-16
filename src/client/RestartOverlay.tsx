@@ -35,11 +35,11 @@ const VEIL: React.CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   gap: 28,
-  background: 'rgba(8, 12, 20, 0.82)',
+  background: 'var(--dsw-alias-bg-mask-3, rgba(8, 12, 20, 0.82))',
   backdropFilter: 'blur(10px)',
   WebkitBackdropFilter: 'blur(10px)',
-  color: '#eef2f9',
-  fontFamily: 'ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+  color: 'var(--dsw-alias-label-primary, #eef2f9)',
+  fontFamily: 'var(--dsw-font-family, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif)',
   userSelect: 'none',
 }
 
@@ -64,9 +64,9 @@ const POWER_BTN: React.CSSProperties = {
   position: 'absolute',
   inset: 0,
   borderRadius: '50%',
-  border: '1px solid rgba(255,255,255,0.14)',
-  background: 'rgba(255,255,255,0.04)',
-  cursor: 'pointer',
+  border: '1px solid var(--dsw-alias-border-inverted, rgba(255,255,255,0.14))',
+  background: 'var(--dsw-alias-interactive-bg-hover, rgba(255,255,255,0.04))',
+  cursor: 'default', // decorative power glyph — NOT interactive; no pointer affordance
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'center',
@@ -77,14 +77,14 @@ const CAPTION: React.CSSProperties = {
   fontSize: 17,
   fontWeight: 500,
   letterSpacing: 0.3,
-  color: '#eef2f9',
+  color: 'var(--dsw-alias-label-primary, #eef2f9)',
   textAlign: 'center',
   minHeight: 26,
 }
 
 const SUB: React.CSSProperties = {
   fontSize: 13,
-  color: 'rgba(238,242,249,0.55)',
+  color: 'var(--dsw-alias-label-secondary, rgba(238,242,249,0.55))',
   textAlign: 'center',
   maxWidth: 360,
   lineHeight: 1.6,
@@ -106,9 +106,15 @@ function ActionButton({ label, danger, onClick, disabled }: {
       style={{
         padding: '9px 26px',
         borderRadius: 8,
-        border: danger ? '1px solid rgba(255,133,146,0.5)' : '1px solid rgba(255,255,255,0.18)',
-        background: danger ? 'rgba(255,133,146,0.12)' : 'rgba(255,255,255,0.06)',
-        color: danger ? '#ff8592' : '#eef2f9',
+        border: danger
+          ? '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 50%, transparent)'
+          : '1px solid var(--dsw-alias-border-l3, rgba(255,255,255,0.18))',
+        background: danger
+          ? 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 14%, var(--dsw-alias-bg-overlay, transparent))'
+          : 'var(--dsw-alias-button-floating-hover, rgba(255,255,255,0.06))',
+        color: danger
+          ? 'var(--dsw-alias-state-error-primary, #ff8592)'
+          : 'var(--dsw-alias-label-primary, #eef2f9)',
         fontSize: 14,
         fontWeight: 600,
         cursor: disabled ? 'default' : 'pointer',
@@ -218,7 +224,7 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
       }
 
   return (
-    <div ref={dialogRef} tabIndex={-1} style={VEIL} role="dialog" aria-modal="true" aria-label={shuttingDown ? t('shutdownDialog') : t('restartDialog')} aria-busy={busy}>
+    <div ref={dialogRef} tabIndex={-1} style={VEIL} className="dsh-restart-overlay-veil" role="dialog" aria-modal="true" aria-label={shuttingDown ? t('shutdownDialog') : t('restartDialog')} aria-busy={busy}>
       {/* keyframes: sweeping arc + progress fill transition + caption fade */}
       <style>{`
         @keyframes dsh-restart-sweep {
@@ -233,6 +239,13 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.45; }
         }
+        @media (prefers-reduced-motion: reduce) {
+          .dsh-restart-overlay-veil,
+          .dsh-restart-overlay-veil * {
+            animation: none !important;
+            transition: none !important;
+          }
+        }
       `}</style>
 
       <div style={RING_WRAP}>
@@ -241,14 +254,16 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
           <circle
             cx="74" cy="74" r={RING_R}
             fill="none"
-            stroke="rgba(255,255,255,0.08)"
+            stroke="var(--dsw-alias-border-l3, rgba(255,255,255,0.08))"
             strokeWidth="5"
           />
           {/* progress fill: smooth transition between stage targets */}
           <circle
             cx="74" cy="74" r={RING_R}
             fill="none"
-            stroke={phase === 'error' ? '#ff8592' : '#4f8cff'}
+            stroke={phase === 'error'
+              ? 'var(--dsw-alias-state-error-primary, #ff8592)'
+              : 'var(--dsw-alias-state-business-primary, #4f8cff)'}
             strokeWidth="5"
             strokeLinecap="round"
             strokeDasharray={RING_C}
@@ -262,7 +277,7 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
             <circle
               cx="74" cy="74" r={RING_R}
               fill="none"
-              stroke="rgba(79,140,255,0.5)"
+              stroke="color-mix(in srgb, var(--dsw-alias-state-business-primary, #4f8cff) 50%, transparent)"
               strokeWidth="5"
               strokeLinecap="round"
               strokeDasharray={`${RING_C * 0.18} ${RING_C * 0.82}`}
@@ -273,7 +288,9 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
         <div style={POWER_BTN} aria-hidden="true">
           <span
             style={{
-              color: phase === 'error' ? '#ff8592' : '#eef2f9',
+              color: phase === 'error'
+                ? 'var(--dsw-alias-state-error-primary, #ff8592)'
+                : 'var(--dsw-alias-label-primary, #eef2f9)',
               animation: busy ? 'dsh-restart-pulse 2s ease-in-out infinite' : undefined,
             }}
           >

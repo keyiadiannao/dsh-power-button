@@ -16,8 +16,32 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
   onCancel: () => void
 }): JSX.Element {
   const cancelRef = useRef<HTMLButtonElement | null>(null)
+  const confirmRef = useRef<HTMLButtonElement | null>(null)
   const onKey = (e: KeyboardEvent): void => {
-    if (e.key === 'Escape') onCancel()
+    if (e.key === 'Escape') {
+      onCancel()
+      return
+    }
+    // Modal focus trap: Tab/Shift+Tab cycle ONLY between the two dialog
+    // buttons, so focus can never escape behind the modal.
+    if (e.key !== 'Tab') return
+    const focusables = [cancelRef.current, confirmRef.current].filter((el): el is HTMLButtonElement => el !== null)
+    if (focusables.length === 0) return
+    const active = document.activeElement as HTMLElement | null
+    const idx = focusables.indexOf(active as HTMLButtonElement)
+    if (e.shiftKey) {
+      // Shift+Tab from the first button wraps to the last.
+      if (idx <= 0) {
+        e.preventDefault()
+        focusables[focusables.length - 1]?.focus()
+      }
+    } else {
+      // Tab from the last button wraps to the first.
+      if (idx >= focusables.length - 1 || idx === -1) {
+        e.preventDefault()
+        focusables[0]?.focus()
+      }
+    }
   }
   useEffect(() => {
     // Default focus goes to CANCEL, not confirm: for a destructive action the
@@ -54,7 +78,8 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
     >
       <div
         style={{
-          width: 320,
+          // Responsive: full-width with a small gutter on narrow viewports.
+          width: 'min(360px, calc(100vw - 32px))',
           boxSizing: 'border-box',
           padding: '20px 22px 18px',
           borderRadius: 14,
@@ -89,6 +114,7 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
             {cancelLabel}
           </button>
           <button
+            ref={confirmRef}
             type="button"
             onClick={onConfirm}
             style={{
