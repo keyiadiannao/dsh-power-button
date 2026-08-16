@@ -1,12 +1,12 @@
 /**
- * dsh-restart-button browser half.
+ * dsh-power-button browser half.
  *
  * Standalone plugin: adds a power button to the sidebar footer
  * (`sidebar.footer.action`) that opens an upward menu with two actions —
  * 重启 (restart) and 关机 (shutdown) — plus a full-screen
  * Windows-shutdown-style overlay (`shell.overlay`) with ring progress and
  * stage captions. Fully self-contained: the restart/shutdown ENGINE lives in
- * this plugin's host half (POST /api/dsh-restart-button/{restart,shutdown}),
+ * this plugin's host half (POST /api/dsh-power-button/{restart,shutdown}),
  * so it works standalone with no dependency on any other plugin.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -22,12 +22,12 @@ import { en, zh } from './locales.ts'
 export const inject = ['slots', 'locale']
 
 /** Locale namespace for this plugin's UI strings. */
-export const NS = 'restart.button'
+export const NS = 'power.button'
 
 /** Register the plugin's dictionary keys with the typed locale map. */
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface LocaleNamespaceMap {
-    'restart.button': keyof typeof zh
+    'power.button': keyof typeof zh
   }
 }
 
@@ -85,7 +85,7 @@ export function beginPower(next: PowerAction): void {
   action = next
   errorMsg = null
 
-  const endpoint = next === 'shutdown' ? '/api/dsh-restart-button/shutdown' : '/api/dsh-restart-button/restart'
+  const endpoint = next === 'shutdown' ? '/api/dsh-power-button/shutdown' : '/api/dsh-power-button/restart'
 
   if (next === 'restart') {
     // Stage 1: corner hint, page stays fully usable.
@@ -138,7 +138,7 @@ export function beginPower(next: PowerAction): void {
       }
       let up = false
       try {
-        const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
+        const r = await fetch('/api/dsh-power-button/health', { cache: 'no-store' })
         up = r.ok
       } catch { up = false }
       if (!up) {
@@ -177,7 +177,7 @@ export function beginPower(next: PowerAction): void {
   void (async () => {
     let baseline: string | null = null
     try {
-      const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
+      const r = await fetch('/api/dsh-power-button/health', { cache: 'no-store' })
       if (r.ok) {
         const j = await r.json().catch(() => ({})) as { instanceId?: string }
         if (typeof j.instanceId === 'string') baseline = j.instanceId
@@ -187,7 +187,7 @@ export function beginPower(next: PowerAction): void {
     if (!active()) return
 
     // Fire the restart POST now that the baseline is captured.
-    void fetch('/api/dsh-restart-button/restart', { method: 'POST', keepalive: true })
+    void fetch('/api/dsh-power-button/restart', { method: 'POST', keepalive: true })
       .then(async (r) => {
         const j = await r.json().catch(() => ({}))
         if (!active()) return
@@ -217,7 +217,7 @@ export function beginPower(next: PowerAction): void {
       let up = false
       let instanceChanged = false
       try {
-        const r = await fetch('/api/dsh-restart-button/health', { cache: 'no-store' })
+        const r = await fetch('/api/dsh-power-button/health', { cache: 'no-store' })
         up = r.ok
         if (r.ok) {
           const j = await r.json().catch(() => ({})) as { instanceId?: string }
@@ -321,7 +321,7 @@ const SHUTDOWN_CONFIRM_PENDING = 'SHUTDOWN_CONFIRM_PENDING'
 
 export function apply(ctx: ClientContext): void {
   // Register UI strings so the button/overlay follow the DSH interface language.
-  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-restart-button: dictionaries')
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-power-button: dictionaries')
 
   // Capture the locale service for module-scope (non-component) error strings.
   localeSvc = ctx.locale
@@ -336,19 +336,19 @@ export function apply(ctx: ClientContext): void {
   // contains this plugin. Sibling actions in that SAME container will also
   // participate in wrapping; other footer containers are untouched. An id
   // prevents duplicate <style> on hot reload.
-  const STYLE_ID = 'dsh-restart-button-style'
+  const STYLE_ID = 'dsh-power-button-style'
   let styleEl = document.getElementById(STYLE_ID) as HTMLStyleElement | null
   if (styleEl === null) {
     styleEl = document.createElement('style')
     styleEl.id = STYLE_ID
-    styleEl.textContent = '[class$="_footerActions"]:has(.dsh-restart-button) { flex-wrap: wrap; }'
+    styleEl.textContent = '[class$="_footerActions"]:has(.dsh-power-button) { flex-wrap: wrap; }'
     document.head.appendChild(styleEl)
   }
 
   ctx.slots.inject('sidebar.footer.action', () =>
     ctx.slots.register({
       name: 'sidebar.footer.action',
-      id: 'dsh-restart-button',
+      id: 'dsh-power-button',
       order: -20,
       locale: NS,
       label: (props) => props.t('power'),
@@ -391,7 +391,7 @@ export function apply(ctx: ClientContext): void {
       ? (result as { text: string }).text
       : ''
     if (text === SHUTDOWN_CONFIRM_PENDING) requestShutdownConfirm()
-  }), 'dsh-restart-button: shutdown command confirm')
+  }), 'dsh-power-button: shutdown command confirm')
 
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register({

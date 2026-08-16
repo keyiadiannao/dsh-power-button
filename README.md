@@ -1,4 +1,4 @@
-# dsh-restart-button
+# dsh-power-button
 
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DeepSeek-Harness-blue)](https://github.com/deepseek-ai/DeepSeek-Harness)
@@ -21,7 +21,7 @@ A self-contained **power & lifecycle controller** for [DeepSeek Harness](https:/
 ## Install
 
 ```sh
-dsh plugin --profile web add "github:keyiadiannao/dsh-restart-button#master"
+dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 ```
 
 Restart DSH; a power button appears in the sidebar footer. Requires Node ≥ 22.19.
@@ -38,7 +38,7 @@ The plugin is configured through the profile's cordis layer (`cordis.patch.yml` 
 Example:
 
 ```yaml
-- id: dsh-restart-button
+- id: dsh-power-button
   config:
     enableModelTool: true
 ```
@@ -47,7 +47,7 @@ Example:
 
 ```
 click power → menu → Restart
-[host]    POST /api/dsh-restart-button/restart
+[host]    POST /api/dsh-power-button/restart
           → write ~/.dsh/restart-helper-<pid>-<ts>.cjs
           → spawn `node <helper>` (detached, windowsHide)
 [helper]  wait for old PID to exit → wait for port to free
@@ -56,7 +56,7 @@ click power → menu → Restart
 [client]  poll health → confirm new instanceId → auto reload
 ```
 
-Shutdown posts `/api/dsh-restart-button/shutdown` and terminates without relaunching. Because it is irreversible (the process must be started manually), the GUI **confirms shutdown in a dialog** before it fires — a second click is required. (`/shutdown` and the model tool remain single-action by design; the model never exposes shutdown.)
+Shutdown posts `/api/dsh-power-button/shutdown` and terminates without relaunching. Because it is irreversible (the process must be started manually), the GUI **confirms shutdown in a dialog** before it fires — a second click is required. (`/shutdown` and the model tool remain single-action by design; the model never exposes shutdown.)
 
 Design notes (from real issues hit during development):
 
@@ -87,7 +87,7 @@ Mechanics:
 - On boot, if the restart marker was consumed, `/health` reports
   `restarted: true, fromInstanceId: <old>`.
 - The client checks `/health` once after load; when `restarted` is true it
-  shows the toast, then ACKs via `POST /api/dsh-restart-button/notice-shown`
+  shows the toast, then ACKs via `POST /api/dsh-power-button/notice-shown`
   so a later refresh does not re-show it.
 - Because the confirmation never touches a session file, a restart can no
   longer corrupt session logs or leave unpaired events behind.

@@ -1,5 +1,5 @@
-# dsh-restart-button bundle patch: mount into the profile.
+# dsh-power-button bundle patch: mount into the profile.
 - insert:
-    - id: dsh-restart-button
-      name: 'dsh-restart-button'
+    - id: dsh-power-button
+      name: 'dsh-power-button'
 

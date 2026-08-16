@@ -1,6 +1,6 @@
 import z from "@deepseek-ai/schemastery";
 //#region src/index.d.ts
-declare const name = "dsh-restart-button";
+declare const name = "dsh-power-button";
 declare const inject: string[];
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 interface Config {

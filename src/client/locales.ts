@@ -1,6 +1,6 @@
 /**
- * Locale dictionaries for dsh-restart-button (zh / en).
- * Registered under the `restart.button` namespace; components receive `t`
+ * Locale dictionaries for dsh-power-button (zh / en).
+ * Registered under the `power.button` namespace; components receive `t`
  * through the slot's declared `locale:` and follow the DSH UI language.
  */
 

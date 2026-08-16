@@ -1,5 +1,5 @@
 {
-  "name": "dsh-restart-button",
+  "name": "dsh-power-button",
   "version": "0.2.0",
   "description": "Self-contained power control for DSH: sidebar power button with an upward 重启/关机 menu plus a Windows-shutdown-style overlay. Own restart & shutdown engine (no dependency on other plugins), MIT licensed.",
   "type": "module",
@@ -79,7 +79,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/keyiadiannao/dsh-restart-button.git"
+    "url": "git+https://github.com/keyiadiannao/dsh-power-button.git"
   },
   "keywords": [
     "dsh",
@@ -92,7 +92,7 @@
     "dsh-plugin"
   ],
   "bugs": {
-    "url": "https://github.com/keyiadiannao/dsh-restart-button/issues"
+    "url": "https://github.com/keyiadiannao/dsh-power-button/issues"
   },
-  "homepage": "https://github.com/keyiadiannao/dsh-restart-button#readme"
+  "homepage": "https://github.com/keyiadiannao/dsh-power-button#readme"
 }

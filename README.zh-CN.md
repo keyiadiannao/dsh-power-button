@@ -1,4 +1,4 @@
-# dsh-restart-button
+# dsh-power-button
 
 [![license](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![DSH](https://img.shields.io/badge/DeepSeek-Harness-blue)](https://github.com/deepseek-ai/DeepSeek-Harness)
@@ -21,7 +21,7 @@
 ## 安装
 
 ```sh
-dsh plugin --profile web add "github:keyiadiannao/dsh-restart-button#master"
+dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 ```
 
 重启 DSH 后生效:侧边栏底部出现电源按钮。需要 Node ≥ 22.19。
@@ -38,7 +38,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-restart-button#master"
 示例:
 
 ```yaml
-- id: dsh-restart-button
+- id: dsh-power-button
   config:
     enableModelTool: true
 ```
@@ -47,7 +47,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-restart-button#master"
 
 ```
 点击电源 → 菜单 → 重启
-[宿主]   POST /api/dsh-restart-button/restart
+[宿主]   POST /api/dsh-power-button/restart
          → 写 ~/.dsh/restart-helper-<pid>-<ts>.cjs
          → spawn `node <helper>` (detached, windowsHide)
 [助手]   等旧 PID 退出 → 等端口释放 → 用相同 execPath/argv/cwd 重新拉起 DSH → 自删
@@ -55,7 +55,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-restart-button#master"
 [客户端] 轮询 health → 确认新 instanceId → 自动刷新
 ```
 
-关机则 POST `/api/dsh-restart-button/shutdown`,终止且不拉起。由于关机不可逆(进程停止后需手动启动),GUI 在关机前会**弹确认对话框**,需要再次点击确认才执行。(`/shutdown` 命令与模型工具保持单次触发;模型不暴露关机。)
+关机则 POST `/api/dsh-power-button/shutdown`,终止且不拉起。由于关机不可逆(进程停止后需手动启动),GUI 在关机前会**弹确认对话框**,需要再次点击确认才执行。(`/shutdown` 命令与模型工具保持单次触发;模型不暴露关机。)
 
 开发中踩过的坑:
 
@@ -83,7 +83,7 @@ toast。这是**纯 UI 提示**:不会向任何会话日志写入内容。(此�
 机制:
 - 启动时若消费到重启 marker,`/health` 会报告 `restarted: true, fromInstanceId: <old>`
 - 客户端加载后查询一次 `/health`;若 `restarted` 为真则显示 toast,然后通过
-  `POST /api/dsh-restart-button/notice-shown` 确认,避免刷新后重复弹出
+  `POST /api/dsh-power-button/notice-shown` 确认,避免刷新后重复弹出
 - 由于确认消息完全不触碰会话文件,重启**不再可能损坏会话日志**或留下未配对事件
 
 ## 开发

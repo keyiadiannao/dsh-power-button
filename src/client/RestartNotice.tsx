@@ -28,9 +28,9 @@ export type RestartNoticeProps = PropsRuntime<'shell.overlay'> & PropsLocale<typ
 /** How long the toast stays visible before fading out. */
 const TOAST_MS = 4500
 /** Health endpoint the toast consults once at mount. */
-const HEALTH = '/api/dsh-restart-button/health'
+const HEALTH = '/api/dsh-power-button/health'
 /** ACK endpoint that clears the in-memory restart confirmation. */
-const ACK = '/api/dsh-restart-button/notice-shown'
+const ACK = '/api/dsh-power-button/notice-shown'
 
 /** Static styles. All colors reference the ui-theme design tokens on `body`,
  * so light/dark and any future palette changes are picked up automatically.

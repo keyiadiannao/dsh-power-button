@@ -97,7 +97,7 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
       <button
         ref={btnRef}
         type="button"
-        className="dsh-restart-button"
+        className="dsh-power-button"
         onClick={() => setOpen(o => !o)}
         aria-haspopup="menu"
         aria-expanded={open}

@@ -1,5 +1,5 @@
 /**
- * dsh-restart-button — host half.
+ * dsh-power-button — host half.
  *
  * Fully self-contained restart & shutdown engine for DeepSeek Harness — no
  * dependency on any other plugin (the earlier revision delegated to
@@ -7,9 +7,9 @@
  * an independent repo that works standalone).
  *
  * Endpoints:
- *   POST /api/dsh-restart-button/restart   — relaunch DSH (detached helper)
- *   POST /api/dsh-restart-button/shutdown  — stop DSH (graceful exit, no relaunch)
- *   GET  /api/dsh-restart-button/health    — liveness probe for the client flow
+ *   POST /api/dsh-power-button/restart   — relaunch DSH (detached helper)
+ *   POST /api/dsh-power-button/shutdown  — stop DSH (graceful exit, no relaunch)
+ *   GET  /api/dsh-power-button/health    — liveness probe for the client flow
  *
  * Model tool:
  *   restart_harness — registers the SAME tool name as anweat/dsh-restart so
@@ -41,7 +41,7 @@
  * original — the helper is written to a real .cjs file rather than a `node
  * -e` one-liner, which avoids a Windows CreateProcess mangling failure. See
  * README for the full attribution note.
- * @module dsh-restart-button
+ * @module dsh-power-button
  */
 
 import { spawn } from 'node:child_process'
@@ -56,7 +56,7 @@ import z from '@deepseek-ai/schemastery'
 const require = createRequire(import.meta.url)
 const PLUGIN_VERSION = (require('../package.json') as { version?: string }).version ?? '0.0.0'
 
-export const name = 'dsh-restart-button'
+export const name = 'dsh-power-button'
 export const inject = ['webServer', 'tools', 'commands', 'sessions', 'settings']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
@@ -81,7 +81,7 @@ export const Config: z<Config> = z.object({
   maxDelayMs: z.number().default(5000).min(1000),
 })
 
-const BASE = '/api/dsh-restart-button'
+const BASE = '/api/dsh-power-button'
 
 /** DSH home per the official contract: explicit $DSH_HOME, else ~/.dsh. */
 function dshHome(): string {
@@ -99,7 +99,7 @@ let CURRENT_PORT = 3080
 
 /** Per-port marker path. Exported for tests (isolated via DSH_HOME). */
 export function markerPath(): string {
-  return path.join(RUNTIME_DIR, `dsh-restart-marker-${CURRENT_PORT}.json`)
+  return path.join(RUNTIME_DIR, `dsh-power-marker-${CURRENT_PORT}.json`)
 }
 
 /** Per-process identity: fixed for this instance's lifetime. The client can
@@ -562,7 +562,7 @@ function shutdownDsh(ctx, res) {
  *      (normalized); absent Origin is fine (curl/non-browser — Host already
  *      bound the request).
  *
- * NOTE: our `/api/dsh-restart-button/*` prefix is LONGER than the official
+ * NOTE: our `/api/dsh-power-button/*` prefix is LONGER than the official
  * `/api` route, so webServer's longest-prefix-wins matching means these
  * requests never pass through the official fence automatically — this guard
  * is the only line of defense for them.
@@ -690,13 +690,13 @@ export function apply(ctx, config: Config) {
           restartConfirmation = null
           return json(res, 200, { ok: true, action: 'notice-shown' })
         }
-        json(res, 404, { ok: false, error: `no dsh-restart-button endpoint ${sub}` })
+        json(res, 404, { ok: false, error: `no dsh-power-button endpoint ${sub}` })
       } catch (e) {
         releasePowerTransition()
         json(res, 500, { ok: false, error: e.message })
       }
     },
-  }), 'dsh-restart-button: http routes')
+  }), 'dsh-power-button: http routes')
 
   // Model tool: same name as anweat/dsh-restart's `restart_harness` so this
   // plugin stands in for it. On by default (config.enableModelTool); set
@@ -710,11 +710,11 @@ export function apply(ctx, config: Config) {
         name: 'restart_harness',
         description: isEnglishLocale(ctx)
           ? 'Restart the whole DeepSeek Harness process to reload plugins and config (profile cordis layers, settings, etc). '
-            + 'Provided by dsh-restart-button (standalone): spawns a detached helper that waits for the old process to exit and the port to free, '
+            + 'Provided by dsh-power-button (standalone): spawns a detached helper that waits for the old process to exit and the port to free, '
             + 'then relaunches with the same command line and cwd, after which the old process exits. '
             + 'The current session connection drops briefly and the page auto-reconnects. Returns ok and a note.'
           : '重启整个 DeepSeek Harness 进程，用于重新加载插件与配置（profile 的 cordis 组合、settings 等）。'
-            + '由 dsh-restart-button 提供（独立实现）：派生一个 detach 的 helper，'
+            + '由 dsh-power-button 提供（独立实现）：派生一个 detach 的 helper，'
             + '在旧进程退出并释放端口后以原命令行在原目录重新拉起，然后旧进程退出。'
             + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
             + '返回 ok 与说明文本。',
@@ -828,5 +828,5 @@ export function apply(ctx, config: Config) {
         }
       },
     })
-  }, 'dsh-restart-button: commands')
+  }, 'dsh-power-button: commands')
 }

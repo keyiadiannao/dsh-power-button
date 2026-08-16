@@ -2,7 +2,7 @@
  * Shared modal confirm dialog for the irreversible shutdown action. Used both
  * by the power-button menu (RestartButton) and by the `/shutdown` command path
  * (client/index.ts listens for the SHUTDOWN_CONFIRM_PENDING signal and shows
- * this same dialog before POSTing /api/dsh-restart-button/shutdown).
+ * this same dialog before POSTing /api/dsh-power-button/shutdown).
  */
 import { useEffect, useRef } from 'react'
 
