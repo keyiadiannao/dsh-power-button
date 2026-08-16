@@ -39,10 +39,14 @@ const WRAP: React.CSSProperties = {
   position: 'fixed',
   bottom: 32,
   left: '50%',
+  /* Horizontal centering lives in the STATIC transform (translateX(-50%)),
+     NOT in the keyframes: an animation without `forwards` reverts to the
+     static style when it ends, and if the keyframes own the centering the
+     toast would jump right (static, no -50%) then left (out-anim applies
+     -50% again) — the visible "drift" the user caught. With the static
+     transform, in/out keyframes only animate opacity + a tiny Y slide. */
+  transform: 'translateX(-50%)',
   zIndex: 1800,
-  /* The wrapper does NOT own translateX: the keyframes below must run on the
-     same transform chain as the layout offset, so the final translate is
-     baked into every keyframe (in/out would otherwise jump horizontally). */
   display: 'flex',
   alignItems: 'center',
   gap: 12,
@@ -55,7 +59,7 @@ const WRAP: React.CSSProperties = {
   fontFamily: 'var(--dsw-font-family, ui-sans-serif, system-ui, sans-serif)',
   fontSize: 13,
   userSelect: 'none',
-  animation: 'dsh-restart-toast-in 0.35s cubic-bezier(0.21, 1.02, 0.45, 1)',
+  animation: 'dsh-restart-toast-in 0.35s cubic-bezier(0.21, 1.02, 0.45, 1) forwards',
 }
 
 const BADGE: React.CSSProperties = {
