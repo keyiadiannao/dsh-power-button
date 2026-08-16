@@ -22,23 +22,23 @@ A self-contained **power & lifecycle controller** for [DeepSeek Harness](https:/
 
 **① Sidebar power button** — a theme-aware footer entry, styled to match the adjacent Settings trigger.
 
-![Power button in the sidebar footer](docs/screenshots/power-button.png)
+![Power button in the sidebar footer](docs/screenshots/en/power-button.png)
 
 **② Restart / Shutdown menu** — opens from the power button; two actions, one click away.
 
-![Restart / Shutdown menu](docs/screenshots/power-menu.png)
+![Restart / Shutdown menu](docs/screenshots/en/power-menu.png)
 
 **③ Shutdown confirm dialog** — guard against accidental shutdowns: the default focus sits on **Cancel**, and only an explicit confirm actually stops the process.
 
-![Shutdown confirm dialog](docs/screenshots/shutdown-confirm.png)
+![Shutdown confirm dialog](docs/screenshots/en/shutdown-confirm.png)
 
 **④ Shutdown progress overlay** — a Windows-style full-screen transition showing the current stage while the process winds down.
 
-![Shutdown progress overlay](docs/screenshots/shutdown-progress.png)
+![Shutdown progress overlay](docs/screenshots/en/shutdown-progress.png)
 
 **⑤ Restart completed toast** — after the page auto-reloads, a success notice confirms DSH is back.
 
-![Restart completed toast](docs/screenshots/restart-done.png)
+![Restart completed toast](docs/screenshots/en/restart-done.png)
 
 ## Install
 
