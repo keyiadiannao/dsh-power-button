@@ -14,6 +14,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { RestartButton } from './RestartButton.tsx'
 import { RestartNotice } from './RestartNotice.tsx'
 import { RestartOverlay } from './RestartOverlay.tsx'
+import { RestartPreparing } from './RestartPreparing.tsx'
 import { ShutdownConfirmDialog } from './ShutdownConfirmDialog.tsx'
 import { en, zh } from './locales.ts'
 
@@ -34,7 +35,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 export type PowerAction = 'restart' | 'shutdown'
 
 /** Global power-flow state shared between the button, menu, and overlay. */
-export type RestartPhase = 'idle' | 'shutting' | 'waiting' | 'recovering' | 'off' | 'error'
+export type RestartPhase = 'idle' | 'preparing' | 'shutting' | 'waiting' | 'recovering' | 'off' | 'error'
 
 let phase: RestartPhase = 'idle'
 let action: PowerAction = 'restart'
@@ -72,16 +73,37 @@ function fail(msg: string): void {
  * overwriting a newer flow's phase (e.g. error → waiting on retry). */
 let operationId = 0
 
-/** Kick a restart or shutdown. Opens the overlay and drives the flow. */
+/** Kick a restart or shutdown. Opens the overlay and drives the flow.
+ * Restart goes through a brief `preparing` stage first (a small corner hint,
+ * no full-screen veil) so the user is not slammed by a modal in the first
+ * hundreds of milliseconds — the POST is still in flight and the page is
+ * alive; the full-screen overlay only appears once the connection is about to
+ * actually drop. */
 export function beginPower(next: PowerAction): void {
   const myOperation = ++operationId
   const active = (): boolean => myOperation === operationId
   action = next
-  phase = 'shutting'
   errorMsg = null
-  emit()
 
   const endpoint = next === 'shutdown' ? '/api/dsh-restart-button/shutdown' : '/api/dsh-restart-button/restart'
+
+  if (next === 'restart') {
+    // Stage 1: corner hint, page stays fully usable.
+    phase = 'preparing'
+    emit()
+    // Stage 2: after a short beat (POST delivered, flush underway) switch to
+    // the full-screen lifecycle overlay. Bound: never skip to the overlay if
+    // a newer operation superseded this one.
+    setTimeout(() => {
+      if (!active() || phase !== 'preparing') return
+      phase = 'shutting'
+      emit()
+    }, 800)
+  } else {
+    // Shutdown already has its own confirm dialog; go straight to the veil.
+    phase = 'shutting'
+    emit()
+  }
 
   // Shutdown: fire-and-forget the POST (keepalive survives the page/process
   // lifecycle), then poll health. The process exits and never comes back —
@@ -339,6 +361,16 @@ export function apply(ctx: ClientContext): void {
       id: 'dsh-restart-overlay',
       locale: NS,
     }, RestartOverlay))
+
+  // Corner "preparing to restart" hint — shown during the brief pre-veil
+  // window so the full-screen overlay does not slam in the moment the user
+  // clicks Restart.
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register({
+      name: 'shell.overlay',
+      id: 'dsh-restart-preparing',
+      locale: NS,
+    }, RestartPreparing))
 
   // UI-only "已重启" toast: shown once after a restart via /health's
   // `restarted` flag. Lives in the same additive overlay slot; unlike the

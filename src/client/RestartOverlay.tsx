@@ -158,7 +158,9 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
     target?.focus()
   }, [phase])
 
-  if (phase === 'idle') return null
+  // `preparing` is handled by the corner hint (RestartPreparing), not the
+  // full-screen veil: the page is still alive and the POST is in flight.
+  if (phase === 'idle' || phase === 'preparing') return null
 
   const busy = phase === 'shutting' || phase === 'waiting' || phase === 'recovering'
   const shuttingDown = action === 'shutdown'
