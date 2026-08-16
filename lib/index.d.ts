@@ -36,7 +36,10 @@ declare function consumeRestartConfirmation(): {
  */
 declare function redactCommandLine(parts: readonly string[]): string;
 /** Floor/clamp the model-visible restart delay: the model must never be able
- * to kill the process before its own tool/result and turn boundary settle. */
+ * to kill the process before its own tool/result and turn boundary settle.
+ * The floor applies whenever a numeric positive delay is given; the ceiling
+ * (config.maxDelayMs, schema-validated >= 1000) caps every outcome INCLUDING
+ * the non-numeric fallback, so clamp(anything, maxDelayMs) ∈ [1000, maxDelayMs]. */
 declare function clampModelDelayMs(raw: number, maxDelayMs: number): number;
 /** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
  * accumulate one file per restart forever. Best-effort, never throws. */

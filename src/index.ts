@@ -32,7 +32,8 @@
  *   - No taskkill /T /F (it walks the parent-child chain and kills the helper),
  *     no PowerShell (window popup + quoting traps).
  *
- * Shutdown: a plain `process.exit(0)` after the response flushes — nothing
+ * Shutdown: prefers DSH's `ctx.appExit` graceful tree dispose (with
+ * `process.exit(0)` as fallback for non-standard embeddings); nothing
  * relaunches, so DSH stays down until the user starts it again.
  *
  * Design note (license): the detached-helper relaunch idea is the same
@@ -72,7 +73,12 @@ export interface Config {
 /** Schemastery schema; cordis validates and provides it as apply(ctx, config). */
 export const Config: z<Config> = z.object({
   enableModelTool: z.boolean().default(true),
-  maxDelayMs: z.number().default(5000),
+  // The model delay floor (MIN_MODEL_DELAY_MS) is only meaningful while the
+  // configured ceiling is at least that floor — clampModelDelayMs then always
+  // lands in [1000, maxDelayMs]. A ceiling below the floor would let a config
+  // value silently defeat the 1000ms floor (e.g. maxDelayMs: 200 → clamp
+  // returns 200), so reject it at schema validation time.
+  maxDelayMs: z.number().default(5000).min(1000),
 })
 
 const BASE = '/api/dsh-restart-button'
@@ -139,15 +145,23 @@ export function consumeRestartConfirmation(): { fromInstanceId: string } | null 
   const marker = readMarker()
   if (marker === null) return null
   const oldId = marker.fromInstanceId
-  if (typeof oldId !== 'string' || oldId === INSTANCE_ID) {
-    // Stale or self-referential marker: clear it and report nothing.
+  const relaunched = typeof marker.relaunchedAt === 'string'
+    && Number.isInteger(marker.newPid)
+    && (marker.newPid as number) === process.pid
+  if (typeof oldId !== 'string' || oldId === INSTANCE_ID || !relaunched) {
+    // Stale, self-referential, or intent-only marker (the helper wrote it but
+    // never confirmed a relaunch — e.g. the helper died before spawning, and
+    // this process is a MANUAL boot): clear it and report nothing. Without
+    // the relaunchedAt/newPid check, a stale intent marker would make a
+    // manual boot falsely report "restarted" and show the "已重启" toast.
     try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
     return null
   }
-  // This is a NEW process launched by the restart helper. Consume the
-  // marker NOW so a LATER ordinary boot of this profile cannot mistake
-  // itself for the restarted instance: B restarts from A, exits normally,
-  // then a manual C boot must NOT report "restarted from A".
+  // This is the exact process the helper spawned (newPid === process.pid),
+  // so it IS the freshly-restarted instance. Consume the marker NOW so a
+  // LATER ordinary boot of this profile cannot mistake itself for the
+  // restarted instance: B restarts from A, exits normally, then a manual C
+  // boot must NOT report "restarted from A".
   try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
   return { fromInstanceId: oldId }
 }
@@ -218,12 +232,14 @@ export function redactCommandLine(parts: readonly string[]): string {
 }
 
 /** Floor/clamp the model-visible restart delay: the model must never be able
- * to kill the process before its own tool/result and turn boundary settle. */
+ * to kill the process before its own tool/result and turn boundary settle.
+ * The floor applies whenever a numeric positive delay is given; the ceiling
+ * (config.maxDelayMs, schema-validated >= 1000) caps every outcome INCLUDING
+ * the non-numeric fallback, so clamp(anything, maxDelayMs) ∈ [1000, maxDelayMs]. */
 export function clampModelDelayMs(raw: number, maxDelayMs: number): number {
   const MIN_MODEL_DELAY_MS = 1000
-  return Number.isFinite(raw) && raw > 0
-    ? Math.min(Math.max(Math.floor(raw), MIN_MODEL_DELAY_MS), maxDelayMs)
-    : 2000
+  const desired = Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : 2000
+  return Math.min(Math.max(desired, MIN_MODEL_DELAY_MS), maxDelayMs)
 }
 
 /** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
@@ -373,7 +389,12 @@ function sessionsQuiescent(maxWaitMs) {
   // session file the old one is still appending to.
   const quiescent = await sessionsQuiescent(15000);
   log(quiescent ? 'session logs quiescent' : 'session logs still moving after 15s - proceeding anyway');
-  log('relaunching: ' + relaunch.join(' ').replace(/((?:api[_-]?key|token|secret|password|auth)=?)[^\s]+/ig, '$1***'));
+  // Relaunch breadcrumb with an ALLOWLIST only: the full argv is never logged
+  // (plugin CLI args can carry credentials, and even a good redactor is one
+  // regex away from leaking a value — same rule as the host boot breadcrumb).
+  const relaunchExec = relaunch[0] ?? '';
+  const relaunchScript = relaunch.find((a) => /(^|[\\/])bin\.(ts|js)$/.test(a)) ?? '';
+  log('relaunching: exec=' + relaunchExec + ' script=' + relaunchScript + ' argc=' + relaunch.length);
   const out = fs.openSync(SERVER_LOG, 'a');
   // spawn() reports many failures asynchronously ('error'), not synchronously;
   // wait for 'spawn' to confirm the new process is actually up, retry with
@@ -591,27 +612,6 @@ function releasePowerTransition(): void {
   powerTransition = null
 }
 
-/**
- * After a restart, append a visible "restart complete" ASSISTANT message to
- * each recorded session — the UI renders it as a normal AI reply, which is
- * the semantically correct owner: the assistant informs the user that the
- * harness restarted. It is written straight into the session event log, so
- * it does NOT depend on the agent being alive and does NOT wake any LLM turn
- * (zero token cost). The message becomes part of the session context for the
- * next natural turn, which is fine: it is a plain notice, not a prompt.
- *
- * The event is an `assistant/message` carrying turn 0 / step 0 — a step
- * number real turns never use (steps start at 1), so it groups into its own
- * assistant bubble at the log tail without colliding with any historical
- * turn/step. It carries no usage, so token meters ignore it.
- *
- * Write safety (the corruption seen when a user message races a restart):
- * the session's durable file must stop changing before we append (a dying
- * predecessor still draining its write-behind buffer keeps appending), and
- * the append is immediately flushed. Polls the session store briefly (a
- * resumed session may not be live yet); clears the marker once all notices
- * are appended.
- */
 /** Whether the UI language is English (DSH settings `locale.preference`). */
 function isEnglishLocale(ctx): boolean {
   try {
@@ -647,8 +647,8 @@ export function apply(ctx, config: Config) {
     handler: async (req, res) => {
       const url = new URL(req.url, 'http://x')
       const sub = url.pathname.slice(BASE.length).replace(/\/+$/, '') || '/'
-      // Destructive POSTs require the same-origin guard; health stays open.
-      const needsGuard = (sub === '/restart' || sub === '/shutdown') && req.method === 'POST'
+      // Every mutation POST goes through the same-origin guard; health stays open.
+      const needsGuard = (sub === '/restart' || sub === '/shutdown' || sub === '/notice-shown') && req.method === 'POST'
       if (needsGuard && !isTrustedPowerRequest(req)) {
         return json(res, 403, { ok: false, error: 'forbidden: cross-origin power request' })
       }

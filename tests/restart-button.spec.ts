@@ -12,8 +12,14 @@ import {
 } from '../src/index.ts'
 
 describe('restart marker lifecycle', () => {
-  it('consumeRestartConfirmation returns the old instance and deletes the marker', () => {
-    writeMarker({ fromInstanceId: 'instance-A', requestedAt: new Date().toISOString() })
+  it('consumeRestartConfirmation returns the old instance for a helper-confirmed relaunch', () => {
+    // A REAL helper relaunch writes relaunchedAt + newPid === the new process.
+    writeMarker({
+      fromInstanceId: 'instance-A',
+      requestedAt: new Date().toISOString(),
+      newPid: process.pid,
+      relaunchedAt: new Date().toISOString(),
+    })
     expect(existsSync(markerPath())).toBe(true)
     const result = consumeRestartConfirmation()
     expect(result).toEqual({ fromInstanceId: 'instance-A' })
@@ -21,8 +27,33 @@ describe('restart marker lifecycle', () => {
     expect(existsSync(markerPath())).toBe(false)
   })
 
+  it('rejects an intent-only marker (helper died before spawning) as a manual boot', () => {
+    // restartDsh writes {fromInstanceId, requestedAt} BEFORE the helper spawns.
+    // If the helper dies before confirming a relaunch (no newPid/relaunchedAt),
+    // a subsequent MANUAL boot must NOT report "restarted".
+    writeMarker({ fromInstanceId: 'instance-A', requestedAt: new Date().toISOString() })
+    const result = consumeRestartConfirmation()
+    expect(result).toBeNull()
+    expect(existsSync(markerPath())).toBe(false)
+  })
+
+  it('rejects a marker whose newPid does not match this process', () => {
+    // The helper recorded relaunching a DIFFERENT pid (e.g. its first spawn
+    // failed and it retried, or the marker is from another instance): only the
+    // exact process the helper spawned may claim the restart.
+    writeMarker({
+      fromInstanceId: 'instance-A',
+      requestedAt: new Date().toISOString(),
+      newPid: process.pid + 1,
+      relaunchedAt: new Date().toISOString(),
+    })
+    const result = consumeRestartConfirmation()
+    expect(result).toBeNull()
+    expect(existsSync(markerPath())).toBe(false)
+  })
+
   it('a later ordinary boot with no marker does not report restarted', () => {
-    // The previous test consumed the marker. A fresh process (different
+    // The previous tests consumed the marker. A fresh process (different
     // instance id) starting with no marker must NOT claim a restart.
     const result = consumeRestartConfirmation()
     expect(result).toBeNull()
@@ -40,6 +71,23 @@ describe('clampModelDelayMs', () => {
     expect(clampModelDelayMs(3000, 5000)).toBe(3000)
     expect(clampModelDelayMs(6000, 5000)).toBe(5000)
     expect(clampModelDelayMs(2000, 5000)).toBe(2000)
+  })
+  it('stays within [floor, max] for every input', () => {
+    // Regression: previously clamp(NaN, 500) returned 2000 (escaped the
+    // ceiling) and a config maxDelayMs below the floor would have defeated
+    // the 1000ms floor. The clamp now never leaves [1000, maxDelayMs]; the
+    // schema separately rejects maxDelayMs < 1000 at config time.
+    expect(clampModelDelayMs(1, 200)).toBe(200) // ceiling wins over floor
+    expect(clampModelDelayMs(6000, 200)).toBe(200)
+    expect(clampModelDelayMs(3000, 5000)).toBe(3000)
+    expect(clampModelDelayMs(1, 5000)).toBe(1000) // floor applies within valid range
+  })
+  it('caps the non-numeric fallback at the configured max', () => {
+    // Regression: NaN/0 previously escaped the ceiling and returned 2000 even
+    // when maxDelayMs was smaller; now every outcome respects the ceiling.
+    expect(clampModelDelayMs(Number.NaN, 500)).toBe(500)
+    expect(clampModelDelayMs(0, 500)).toBe(500)
+    expect(clampModelDelayMs(Number.NaN, 1000)).toBe(1000)
   })
 })
 
