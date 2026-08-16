@@ -5,6 +5,7 @@
  * this same dialog before POSTing /api/dsh-power-button/shutdown).
  */
 import { useEffect, useRef } from 'react'
+import { danger, motion, radius, shadow } from './theme.ts'
 
 /** Fully self-contained: styled with DSH design tokens, own focus trap and Esc handling. */
 export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConfirm, onCancel }: {
@@ -77,18 +78,43 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
       }}
     >
       <div
+        data-dsh-power-modal
         style={{
           // Responsive: full-width with a small gutter on narrow viewports.
           width: 'min(360px, calc(100vw - 32px))',
           boxSizing: 'border-box',
-          padding: '20px 22px 18px',
-          borderRadius: 14,
+          padding: '22px 22px 18px',
+          borderRadius: radius.modal,
           background: 'var(--dsw-alias-bg-layer-2, rgba(24,28,38,0.98))',
           border: '1px solid var(--dsw-alias-border-l3, rgba(196,211,232,0.31))',
-          boxShadow: '0 16px 48px rgba(0,0,0,0.45)',
+          boxShadow: shadow.modal,
           color: 'var(--dsw-alias-label-primary, #f2f6fc)',
+          animation: `dsh-power-modal-in ${motion.modal} ${motion.ease}`,
         }}
       >
+        {/* Irreversible-action affordance: a low-saturation dark-red circular
+            base with a power glyph — first thing the eye lands on, without the
+            shout of a solid red warning. */}
+        <div
+          aria-hidden="true"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            width: 36,
+            height: 36,
+            borderRadius: '50%',
+            background: danger.iconBase,
+            border: `1px solid ${danger.iconBorder}`,
+            color: 'var(--dsw-alias-state-error-primary, #ff8592)',
+            marginBottom: 14,
+          }}
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+            <path d="M12 3v8" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+            <path d="M7.5 5.6a8 8 0 1 0 9 0" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+          </svg>
+        </div>
         <div style={{ fontSize: 15, fontWeight: 650, lineHeight: 1.4, marginBottom: 8 }}>
           {title}
         </div>
@@ -101,15 +127,19 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
             type="button"
             onClick={onCancel}
             style={{
-              padding: '7px 16px',
-              borderRadius: 8,
-              border: '1px solid var(--dsw-alias-border-l3, rgba(196,211,232,0.31))',
+              height: 36,
+              padding: '0 16px',
+              borderRadius: radius.control,
+              border: 'none',
               background: 'transparent',
               color: 'var(--dsw-alias-label-primary, #f2f6fc)',
               font: 'inherit',
               fontSize: 13,
               cursor: 'pointer',
+              transition: `background ${motion.fast} ${motion.ease}`,
             }}
+            onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--dsw-alias-interactive-bg-hover, rgba(128,128,128,0.14))' }}
+            onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
           >
             {cancelLabel}
           </button>
@@ -118,26 +148,37 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
             type="button"
             onClick={onConfirm}
             style={{
-              padding: '7px 16px',
-              borderRadius: 8,
-              border: '1px solid color-mix(in srgb, var(--dsw-alias-state-error-primary) 55%, transparent)',
+              height: 36,
+              padding: '0 16px',
+              borderRadius: radius.control,
+              border: `1px solid ${danger.iconBorder}`,
               // Danger button fill: mix the error primary at a low ratio into
               // the surface (official DSH pattern) instead of using the solid
               // error-secondary — in dark mode error-primary and
               // error-secondary are the SAME bright red, so a solid secondary
               // background would make the text unreadable.
-              background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 16%, var(--dsw-alias-bg-layer-2, rgba(24,28,38,0.98)))',
+              background: danger.iconBase,
               color: 'var(--dsw-alias-state-error-primary, #ff8592)',
               font: 'inherit',
               fontSize: 13,
               fontWeight: 600,
               cursor: 'pointer',
+              transition: `background ${motion.fast} ${motion.ease}`,
             }}
           >
             {confirmLabel}
           </button>
         </div>
       </div>
+      <style>{`
+        @keyframes dsh-power-modal-in {
+          from { opacity: 0; transform: translateY(8px) scale(0.98); }
+          to   { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          [data-dsh-power-modal] { animation: none !important; }
+        }
+      `}</style>
     </div>
   )
 }

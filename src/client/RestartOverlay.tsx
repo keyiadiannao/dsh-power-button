@@ -19,11 +19,15 @@ import { useEffect, useRef, useSyncExternalStore } from 'react'
 import {
   getRestartPhase, getPowerAction, getRestartError, onRestartChange, beginPower, dismissPower, NS,
 } from './index.ts'
+import { motion, veil } from './theme.ts'
 
 export type RestartOverlayProps = PropsRuntime<'shell.overlay'> & PropsLocale<typeof NS>
 
 const RING_R = 52
 const RING_C = 2 * Math.PI * RING_R
+/** Ring canvas size (120-128 px — lighter than the old 148). */
+const RING_SIZE = 128
+const RING_CENTER = RING_SIZE / 2
 
 // ---- static styles (self-contained; no external classes) ----
 const VEIL: React.CSSProperties = {
@@ -35,9 +39,9 @@ const VEIL: React.CSSProperties = {
   alignItems: 'center',
   justifyContent: 'center',
   gap: 28,
-  background: 'var(--dsw-alias-bg-mask-3, rgba(8, 12, 20, 0.82))',
-  backdropFilter: 'blur(10px)',
-  WebkitBackdropFilter: 'blur(10px)',
+  background: veil.background,
+  backdropFilter: veil.backdropFilter,
+  WebkitBackdropFilter: veil.backdropFilter,
   color: 'var(--dsw-alias-label-primary, #eef2f9)',
   fontFamily: 'var(--dsw-font-family, ui-sans-serif, system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif)',
   userSelect: 'none',
@@ -45,15 +49,14 @@ const VEIL: React.CSSProperties = {
 
 const RING_WRAP: React.CSSProperties = {
   position: 'relative',
-  width: 148,
-  height: 148,
+  width: RING_SIZE,
+  height: RING_SIZE,
   /* NOT flex: the ring svg layers and the power button must all stack
-     absolute on the same center point. A flex row would lay the two 148px
-     svgs side by side, squash them (measured h=74!) and push the ring
-     up-left of the icon — the misalignment the user caught. */
+     absolute on the same center point. A flex row would lay the two svgs
+     side by side, squash them and push the ring up-left of the icon. */
 }
 
-/** Every ring layer (track, progress, sweep) pins to the 148×148 box. */
+/** Every ring layer (track, progress, sweep) pins to the RING_SIZE box. */
 const RING_LAYER: React.CSSProperties = {
   position: 'absolute',
   top: 0,
@@ -250,16 +253,16 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
 
       <div style={RING_WRAP}>
         {/* base track */}
-        <svg width={148} height={148} style={{ ...RING_LAYER, transform: 'rotate(-90deg)', transformOrigin: 'center' }}>
+        <svg width={RING_SIZE} height={RING_SIZE} style={{ ...RING_LAYER, transform: 'rotate(-90deg)', transformOrigin: 'center' }}>
           <circle
-            cx="74" cy="74" r={RING_R}
+            cx={RING_CENTER} cy={RING_CENTER} r={RING_R}
             fill="none"
             stroke="var(--dsw-alias-border-l3, rgba(255,255,255,0.08))"
             strokeWidth="5"
           />
           {/* progress fill: smooth transition between stage targets */}
           <circle
-            cx="74" cy="74" r={RING_R}
+            cx={RING_CENTER} cy={RING_CENTER} r={RING_R}
             fill="none"
             stroke={phase === 'error'
               ? 'var(--dsw-alias-state-error-primary, #ff8592)'
@@ -273,9 +276,9 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
         </svg>
         {/* sweeping arc while busy */}
         {busy ? (
-          <svg width={148} height={148} style={{ ...RING_LAYER, ...ringStyle }} aria-hidden="true">
+          <svg width={RING_SIZE} height={RING_SIZE} style={{ ...RING_LAYER, ...ringStyle }} aria-hidden="true">
             <circle
-              cx="74" cy="74" r={RING_R}
+              cx={RING_CENTER} cy={RING_CENTER} r={RING_R}
               fill="none"
               stroke="color-mix(in srgb, var(--dsw-alias-state-business-primary, #4f8cff) 50%, transparent)"
               strokeWidth="5"

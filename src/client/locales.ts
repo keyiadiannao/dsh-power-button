@@ -7,10 +7,12 @@
 export const zh = {
   power: '电源',
   powerTitle: '电源（重启 / 关机）',
+  powerBusy: '正在重启 / 关机中…',
   restart: '重启',
   restartHint: '重新启动 DeepSeek Harness',
   shutdown: '关机',
   shutdownHint: '停止 DeepSeek Harness，之后需手动启动',
+  shutdownStops: '停止 Harness',
   // shutdown confirm dialog (irreversible — confirm before going down)
   // Question-form title: reads as a confirmation prompt, not a page heading.
   shutdownConfirmTitle: '关闭 DeepSeek Harness？',
@@ -52,10 +54,12 @@ export const zh = {
 export const en = {
   power: 'Power',
   powerTitle: 'Power (restart / shutdown)',
+  powerBusy: 'Restarting / shutting down…',
   restart: 'Restart',
   restartHint: 'Restart DeepSeek Harness',
   shutdown: 'Shutdown',
   shutdownHint: 'Stop DeepSeek Harness; start it manually when needed',
+  shutdownStops: 'Stops Harness',
   // shutdown confirm dialog (irreversible — confirm before going down)
   shutdownConfirmTitle: 'Shut down DeepSeek Harness?',
   shutdownConfirmBody: 'After shutdown the process stops and you must start it manually.',

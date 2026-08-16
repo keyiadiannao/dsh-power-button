@@ -22,6 +22,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { useEffect, useRef, useState } from 'react'
 import { NS } from './index.ts'
+import { motion, radius, shadow } from './theme.ts'
 
 export type RestartNoticeProps = PropsRuntime<'shell.overlay'> & PropsLocale<typeof NS>
 
@@ -50,21 +51,22 @@ const WRAP: React.CSSProperties = {
   display: 'flex',
   alignItems: 'center',
   gap: 12,
-  padding: '12px 16px 12px 12px',
-  borderRadius: 12,
+  maxWidth: 'min(360px, calc(100vw - 32px))',
+  padding: '10px 14px 10px 12px',
+  borderRadius: radius.surface,
   background: 'var(--dsw-alias-toast-bg, #1c2433)',
   border: '1px solid var(--dsw-alias-border-l3, rgba(0,0,0,0.12))',
-  boxShadow: '0 12px 40px rgba(0, 0, 0, 0.4), 0 1px 0 rgba(255,255,255,0.06) inset',
+  boxShadow: shadow.surface,
   color: 'var(--dsw-alias-label-primary, #eef2f9)',
   fontFamily: 'var(--dsw-font-family, ui-sans-serif, system-ui, sans-serif)',
   fontSize: 13,
   userSelect: 'none',
-  animation: 'dsh-restart-toast-in 0.35s cubic-bezier(0.21, 1.02, 0.45, 1) forwards',
+  animation: `dsh-restart-toast-in ${motion.success} ${motion.ease} forwards`,
 }
 
 const BADGE: React.CSSProperties = {
-  width: 30,
-  height: 30,
+  width: 26,
+  height: 26,
   borderRadius: '50%',
   display: 'flex',
   alignItems: 'center',
