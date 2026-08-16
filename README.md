@@ -97,9 +97,10 @@ Design notes (from real issues hit during development):
 
 ## Restart confirmation — UI toast, never written into a session
 
-After a successful restart the plugin shows a small localized `已重启` /
-`Restarted` toast in the corner of the UI. This is **purely a UI notice**:
-nothing is written into any session log. (This replaced an earlier design that
+After a successful restart the plugin shows a small localized toast
+("Restarted" / "已重启" depending on the UI language) in the corner of the UI.
+This is **purely a UI notice**: nothing is written into any session log. (This
+replaced an earlier design that
 appended a synthetic `assistant/message` (`turn: 0, step: 0`) into the resumed
 conversation — that approach tripped the token-meter's step-pairing invariant
 and could corrupt large sessions, so it was removed. Tracked upstream:
