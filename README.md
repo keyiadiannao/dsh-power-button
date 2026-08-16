@@ -18,6 +18,14 @@ A self-contained **power & lifecycle controller** for [DeepSeek Harness](https:/
 - **Localized UI and host notices** (zh / en), following the profile's `locale.preference`.
 - **Startup housekeeping**: `restart-helper-*.log` files older than 7 days are pruned from the runtime directory.
 
+## Screenshots
+
+| | |
+|---|---|
+| ![Power button in the sidebar footer](docs/screenshots/power-button.png) | ![Restart / Shutdown menu](docs/screenshots/power-menu.png) |
+| ![Shutdown confirm dialog](docs/screenshots/shutdown-confirm.png) | ![Shutdown progress overlay](docs/screenshots/shutdown-progress.png) |
+| ![Restart completed toast](docs/screenshots/restart-done.png) | |
+
 ## Install
 
 ```sh

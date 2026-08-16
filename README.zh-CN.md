@@ -18,6 +18,14 @@
 - **界面与宿主文案本地化**(中文 / English),跟随 profile 的 `locale.preference`
 - **启动清理**:自动清理运行目录下超过 7 天的 `restart-helper-*.log`
 
+## 截图
+
+| | |
+|---|---|
+| ![侧边栏底部的电源按钮](docs/screenshots/power-button.png) | ![重启 / 关机菜单](docs/screenshots/power-menu.png) |
+| ![关机确认对话框](docs/screenshots/shutdown-confirm.png) | ![关机进度遮罩](docs/screenshots/shutdown-progress.png) |
+| ![重启完成提示](docs/screenshots/restart-done.png) | |
+
 ## 安装
 
 ```sh
