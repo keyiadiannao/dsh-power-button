@@ -22,23 +22,23 @@
 
 **① 侧边栏电源按钮** —— 主题适配的底部常驻入口，风格与相邻的设置按钮一致。
 
-![侧边栏底部的电源按钮](docs/screenshots/power-button.png)
+![侧边栏底部的电源按钮](docs/screenshots/zh/power-button.png)
 
 **② 重启 / 关机菜单** —— 点击电源按钮展开，两个动作一次到位。
 
-![重启 / 关机菜单](docs/screenshots/power-menu.png)
+![重启 / 关机菜单](docs/screenshots/zh/power-menu.png)
 
 **③ 关机确认对话框** —— 防误触设计：默认焦点在「取消」，只有显式确认才会真正停止进程。
 
-![关机确认对话框](docs/screenshots/shutdown-confirm.png)
+![关机确认对话框](docs/screenshots/zh/shutdown-confirm.png)
 
 **④ 关机进度遮罩** —— Windows 风格全屏过渡，进程收尾时显示当前阶段。
 
-![关机进度遮罩](docs/screenshots/shutdown-progress.png)
+![关机进度遮罩](docs/screenshots/zh/shutdown-progress.png)
 
 **⑤ 重启完成提示** —— 页面自动重载后，成功提示确认 DSH 已恢复。
 
-![重启完成提示](docs/screenshots/restart-done.png)
+![重启完成提示](docs/screenshots/zh/restart-done.png)
 
 ## 安装
 
