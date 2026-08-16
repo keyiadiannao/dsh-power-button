@@ -15,13 +15,16 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
   onConfirm: () => void
   onCancel: () => void
 }): JSX.Element {
-  const confirmRef = useRef<HTMLButtonElement | null>(null)
+  const cancelRef = useRef<HTMLButtonElement | null>(null)
   const onKey = (e: KeyboardEvent): void => {
     if (e.key === 'Escape') onCancel()
   }
   useEffect(() => {
-    // Focus the confirm button on open; Esc cancels.
-    confirmRef.current?.focus()
+    // Default focus goes to CANCEL, not confirm: for a destructive action the
+    // user must make a deliberate choice to proceed — a stray Enter (or the
+    // focus landing on the dangerous button) must never shut down the harness.
+    // Esc still cancels as a backup.
+    cancelRef.current?.focus()
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -69,6 +72,7 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
           <button
+            ref={cancelRef}
             type="button"
             onClick={onCancel}
             style={{
@@ -85,7 +89,6 @@ export function ShutdownConfirm({ title, body, confirmLabel, cancelLabel, onConf
             {cancelLabel}
           </button>
           <button
-            ref={confirmRef}
             type="button"
             onClick={onConfirm}
             style={{
