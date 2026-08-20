@@ -49,12 +49,7 @@
     "@deepseek-ai/schemastery": "^3.18.1"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/cordis": { "optional": true },
-    "@deepseek-ai/dsh-client-locale": { "optional": true },
-    "@deepseek-ai/dsh-client-runtime": { "optional": true },
-    "@deepseek-ai/dsh-client-ui-slots": { "optional": true },
-    "react": { "optional": true },
-    "react-dom": { "optional": true }
+    "@deepseek-ai/cordis": { "optional": true }
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
