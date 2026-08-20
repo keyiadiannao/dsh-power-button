@@ -644,7 +644,7 @@ export function apply(ctx, config: Config) {
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',
     path: BASE,
-    handler: async (req, res) => {
+    handler: async (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => {
       const url = new URL(req.url, 'http://x')
       const sub = url.pathname.slice(BASE.length).replace(/\/+$/, '') || '/'
       // Every mutation POST goes through the same-origin guard; health stays open.
@@ -693,7 +693,7 @@ export function apply(ctx, config: Config) {
         json(res, 404, { ok: false, error: `no dsh-power-button endpoint ${sub}` })
       } catch (e) {
         releasePowerTransition()
-        json(res, 500, { ok: false, error: e.message })
+        json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
       }
     },
   }), 'dsh-power-button: http routes')
@@ -736,11 +736,11 @@ export function apply(ctx, config: Config) {
           // object/array/string/number/integer/boolean/null and would throw.
           // An empty schema (annotation-only) accepts any JSON value.
           schema: {},
-          render(_args, value) {
+          render(_args: unknown, value: unknown) {
             return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
           },
         },
-        async execute(args) {
+        async execute(args: unknown) {
           const a = (args ?? {}) as { delayMs?: number }
           // Floor the model-visible delay: the restart tool must never be able
           // to kill the process before its own tool/result and turn boundary
