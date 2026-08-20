@@ -174,7 +174,7 @@ export function consumeRestartConfirmation(): { fromInstanceId: string } | null 
  * THIS port to free; a hardcoded 3080 breaks restart on any other port
  * (e.g. the test copy on 3081).
  */
-function resolvePort(ctx): number {
+function resolvePort(ctx: any): number {
   try {
     const bound = ctx.webServer?.server?.address?.()
     if (bound && typeof bound === 'object' && typeof bound.port === 'number' && bound.port > 0) {
@@ -190,7 +190,7 @@ function resolvePort(ctx): number {
   return 3080
 }
 
-function json(res, status, payload) {
+function json(res: import('node:http').ServerResponse, status: number, payload: unknown): void {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
   res.end(JSON.stringify(payload))
 }
@@ -287,7 +287,7 @@ try {
  * Relaunch DSH. Returns immediately; the actual restart happens in a helper
  * that is fully detached from this process tree.
  */
-function restartDsh(ctx, delayMs = 1500) {
+function restartDsh(ctx: any, delayMs = 1500) {
   try {
     const port = resolvePort(ctx)
     // Record restart intent: the new process reads this to confirm it IS the
@@ -471,7 +471,7 @@ function sessionsQuiescent(maxWaitMs) {
       if (live.length === 0) {
         scheduleExit()
       } else {
-        Promise.allSettled(live.map((session) => ctx.sessions.flush(session)))
+        Promise.allSettled(live.map((session: unknown) => ctx.sessions.flush(session)))
           .then(scheduleExit)
           .catch(scheduleExit)
       }
@@ -480,7 +480,7 @@ function sessionsQuiescent(maxWaitMs) {
     }
     return { ok: true, action: 'restart', note: isEnglishLocale(ctx) ? 'DeepSeek Harness is restarting' : 'DeepSeek Harness 正在重启' }
   } catch (e) {
-    return { ok: false, action: 'restart', error: e.message }
+    return { ok: false, action: 'restart', error: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -495,7 +495,7 @@ function sessionsQuiescent(maxWaitMs) {
  * before the connection drops. Nothing relaunches — the user must start DSH
  * again manually.
  */
-function shutdownDsh(ctx, res) {
+function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefined) {
   try {
     const exitNow = (): void => {
       const appExit = ctx.appExit
@@ -514,7 +514,7 @@ function shutdownDsh(ctx, res) {
           exitNow()
           return
         }
-        Promise.allSettled(live.map((session) => ctx.sessions.flush(session)))
+        Promise.allSettled(live.map((session: unknown) => ctx.sessions.flush(session)))
           .then(exitNow)
           .catch(exitNow)
       } catch {
@@ -540,7 +540,7 @@ function shutdownDsh(ctx, res) {
         : 'DeepSeek Harness 正在关机（进程停止后需手动重新启动）',
     }
   } catch (e) {
-    return { ok: false, action: 'shutdown', error: e.message }
+    return { ok: false, action: 'shutdown', error: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -567,7 +567,7 @@ function shutdownDsh(ctx, res) {
  * requests never pass through the official fence automatically — this guard
  * is the only line of defense for them.
  */
-function isTrustedPowerRequest(req): boolean {
+function isTrustedPowerRequest(req: import('node:http').IncomingMessage): boolean {
   const address = req.socket?.remoteAddress
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
   const { host, origin, 'sec-fetch-site': secFetchSite } = req.headers
@@ -613,7 +613,7 @@ function releasePowerTransition(): void {
 }
 
 /** Whether the UI language is English (DSH settings `locale.preference`). */
-function isEnglishLocale(ctx): boolean {
+function isEnglishLocale(ctx: any): boolean {
   try {
     const locale = ctx.settings?.get?.('locale') as { preference?: string } | undefined
     const pref = typeof locale?.preference === 'string' ? locale.preference.toLowerCase() : ''
@@ -622,7 +622,7 @@ function isEnglishLocale(ctx): boolean {
   return false
 }
 
-export function apply(ctx, config: Config) {
+export function apply(ctx: any, config: Config) {
   // Startup housekeeping: prune stale restart-helper logs from previous runs.
   pruneOldRestartLogs()
   // Resolve THIS instance's port first: markers are keyed by port so
@@ -645,7 +645,7 @@ export function apply(ctx, config: Config) {
     kind: 'prefix',
     path: BASE,
     handler: async (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => {
-      const url = new URL(req.url, 'http://x')
+      const url = new URL(req.url ?? '/', 'http://x')
       const sub = url.pathname.slice(BASE.length).replace(/\/+$/, '') || '/'
       // Every mutation POST goes through the same-origin guard; health stays open.
       const needsGuard = (sub === '/restart' || sub === '/shutdown' || sub === '/notice-shown') && req.method === 'POST'

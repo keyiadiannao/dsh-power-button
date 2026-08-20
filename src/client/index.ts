@@ -31,6 +31,44 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
+/**
+ * Self-contained view of the DSH slot contracts this plugin registers into, so
+ * the standalone typecheck (which cannot see the host DSH SlotMap extension —
+ * only the default `'root'` slot exists in the empty SlotMap) still typechecks.
+ * Mirrors the declarations the host rc.8 packages actually make for these
+ * additive slots. See dsh-queue-merge/src/client/index.ts for the same pattern.
+ */
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface SlotMap {
+    /** Sidebar footer actions — additive list (this plugin's power button).
+     *  Owner is the sidebar geometry (`wide` = expanded vs 56px rail), which
+     *  the framework injects (mirror of rc.8 SidebarFooterActionOwnerProps). */
+    'sidebar.footer.action': {
+      kind: 'list'
+      scope: 'root'
+      owner: { wide: boolean }
+    }
+    /** Frame-wide floating layer above every column (toasts, modals, overlays). */
+    'shell.overlay': {
+      kind: 'list'
+      scope: 'root'
+      owner: Record<string, unknown>
+    }
+  }
+}
+
+/** Locale service shape this plugin relies on (rc.6-era client surface). */
+interface LocaleServiceLike {
+  register(ns: string, dicts: unknown): () => void
+  snapshot?: { active?: string }
+}
+
+/** Loose view of the client context services we touch (iterate-over-host drift). */
+type ClientServices = {
+  locale: LocaleServiceLike
+  on?: (name: string, handler: (...args: unknown[]) => void) => () => void
+}
+
 /** What the power flow is doing: restarting or shutting down. */
 export type PowerAction = 'restart' | 'shutdown'
 
@@ -319,12 +357,12 @@ export function onShutdownConfirmChange(fn: () => void): () => void {
 /** Sentinel the host `/shutdown` handler returns to request the GUI dialog. */
 const SHUTDOWN_CONFIRM_PENDING = 'SHUTDOWN_CONFIRM_PENDING'
 
-export function apply(ctx: ClientContext): void {
+export function apply(ctx: ClientContext & ClientServices): void {
   // Register UI strings so the button/overlay follow the DSH interface language.
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-power-button: dictionaries')
 
   // Capture the locale service for module-scope (non-component) error strings.
-  localeSvc = ctx.locale
+  localeSvc = ctx.locale as { snapshot: { active: string } }
 
   // Self-contained layout fix: this plugin's footer button is full-width
   // (width: calc(100% + 8px)), so it needs the sidebar's footer-actions
@@ -351,7 +389,7 @@ export function apply(ctx: ClientContext): void {
       id: 'dsh-power-button',
       order: -20,
       locale: NS,
-      label: (props) => props.t('power'),
+      label: () => tl('power'),
     }, RestartButton))
 
   // Full-screen restart/shutdown overlay (additive list slot; coexists with others).
@@ -385,13 +423,13 @@ export function apply(ctx: ClientContext): void {
   // /shutdown confirm dialog: the host handler signals SHUTDOWN_CONFIRM_PENDING
   // through command/executed; this listener pops the same GUI dialog as the
   // power button, and only a confirmed click actually shuts down.
-  ctx.effect(() => ctx.on('command/executed', (_sessionId, name, result) => {
+  ctx.effect(() => ctx.on?.('command/executed', (...args: unknown[]) => {
+    const name = typeof args[1] === 'string' ? args[1] : ''
     if (name !== 'shutdown') return
-    const text = typeof (result as { text?: unknown } | undefined)?.text === 'string'
-      ? (result as { text: string }).text
-      : ''
+    const result = args[2] as { text?: unknown } | undefined
+    const text = typeof result?.text === 'string' ? result.text : ''
     if (text === SHUTDOWN_CONFIRM_PENDING) requestShutdownConfirm()
-  }), 'dsh-power-button: shutdown command confirm')
+  }) ?? (() => {}), 'dsh-power-button: shutdown command confirm')
 
   ctx.slots.inject('shell.overlay', () =>
     ctx.slots.register({
