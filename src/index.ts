@@ -242,6 +242,57 @@ export function clampModelDelayMs(raw: number, maxDelayMs: number): number {
   return Math.min(Math.max(desired, MIN_MODEL_DELAY_MS), maxDelayMs)
 }
 
+/** Last-resort exit for embeddings that never provided the launcher channel. */
+function hardExit(): void {
+  try { process.exit(0) } catch { /* ignore */ }
+}
+
+/**
+ * Bounded grace after the launcher has been asked to exit: DSH disposes the
+ * application tree with its own 5s cap, but that cap only force-exits while
+ * disposal is still running — a disposal that resolves early leaves the
+ * process to end on its own, and one lingering handle (background job, MCP
+ * child, plugin-owned listener) then keeps the loop alive. The restart helper
+ * waits 30s for the old pid and gives up WITHOUT relaunching, so an unbounded
+ * graceful exit can leave the user with no server at all. 15s clears DSH's own
+ * 5s grace and still lands well inside the helper's patience.
+ */
+export const APP_EXIT_WATCHDOG_MS = 15_000
+
+/**
+ * Request the launcher's bounded process exit, falling back to
+ * {@link hardExit} when the host never provided the channel (non-standard
+ * embedding) or when the graceful exit has not landed by
+ * {@link APP_EXIT_WATCHDOG_MS}.
+ *
+ * Reads through the global service store (`ctx.get`), NOT the property proxy:
+ * `appExit` is an optional launcher-provided host value this plugin does not
+ * declare in `inject`, so `ctx.appExit` is undefined and the graceful branch
+ * would never run — every restart/shutdown silently took the `process.exit`
+ * fallback, skipping tree disposal, storage flush, and port release. Official
+ * readers (dsh-cmdline, dsh-headless) read it through `ctx.get` for the same
+ * reason.
+ *
+ * @param ctx - plugin context; a host without the Cordis store also falls back.
+ * @param fallbackExit - seam for tests; defaults to the real `process.exit`.
+ * @param watchdogMs - seam for tests; defaults to {@link APP_EXIT_WATCHDOG_MS}.
+ */
+export function requestAppExit(
+  ctx: any,
+  fallbackExit: () => void = hardExit,
+  watchdogMs = APP_EXIT_WATCHDOG_MS,
+): void {
+  const appExit = ctx?.get?.('appExit')
+  if (typeof appExit !== 'function') {
+    fallbackExit()
+    return
+  }
+  appExit(0)
+  // Unref'd: a watchdog must never be the reason the process stays alive.
+  const watchdog = setTimeout(fallbackExit, watchdogMs)
+  watchdog.unref?.()
+}
+
 /** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
  * accumulate one file per restart forever. Best-effort, never throws. */
 export function pruneOldRestartLogs(maxAgeDays = 7): void {
@@ -458,12 +509,7 @@ function sessionsQuiescent(maxWaitMs) {
       // Prefer DSH's `ctx.appExit` (graceful tree dispose); fall back to
       // process.exit in non-standard embeddings.
       setTimeout(() => {
-        const appExit = ctx.appExit
-        if (typeof appExit === 'function') {
-          appExit(0)
-        } else {
-          try { process.exit(0) } catch { /* ignore */ }
-        }
+        requestAppExit(ctx)
       }, delayMs)
     }
     try {
@@ -498,12 +544,7 @@ function sessionsQuiescent(maxWaitMs) {
 function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefined) {
   try {
     const exitNow = (): void => {
-      const appExit = ctx.appExit
-      if (typeof appExit === 'function') {
-        appExit(0)
-      } else {
-        try { process.exit(0) } catch { /* ignore */ }
-      }
+      requestAppExit(ctx)
     }
     // Flush every live session before exiting so the write-behind buffer is
     // durably on disk — same durability barrier as the restart path.
@@ -675,6 +716,10 @@ export function apply(ctx: any, config: Config) {
             instanceId: INSTANCE_ID,
             pluginVersion: PLUGIN_VERSION,
             lifecycle: powerTransition ?? (restartConfirmation !== null ? 'restarted' : 'ready'),
+            // Surfaces whether the launcher-provided exit channel resolves, so
+            // a host where restarts silently fall back to process.exit is
+            // diagnosable from a single request instead of from a 30s stall.
+            appExit: typeof ctx.get?.('appExit') === 'function' ? 'available' : 'missing',
           }
           if (restartConfirmation !== null) {
             body.restarted = true

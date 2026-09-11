@@ -1,6 +1,6 @@
 {
   "name": "dsh-power-button",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Self-contained power control for DSH: sidebar power button with an upward 重启/关机 menu plus a Windows-shutdown-style overlay. Own restart & shutdown engine (no dependency on other plugins), MIT licensed.",
   "type": "module",
   "main": "./lib/index.js",

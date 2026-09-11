@@ -85,6 +85,8 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 - helper 写成**真实 .cjs 文件**而非 `node -e`:多行 `node -e` 脚本会被 Windows `CreateProcess` 破坏成静默 `SyntaxError`
 - 重启成功以**每次进程独立的 `instanceId` 变化**(旧→新)为准,短暂离线本身不算成功
 - **持久写静止检查**:旧进程退出、端口释放后,helper 轮询所有会话日志的 `(size, mtimeMs)` 直到连续两次采样一致(上限约 15 秒)才重启。旧进程主循环退出后其会话写缓冲可能仍在落盘;在仍在追加的文件上拉起新进程会插入旧 seq 造成会话损坏——此检查封堵了这个窗口
+- **启动器的退出请求要当服务读,不能当属性读**:它在 `ctx.get('appExit')`。`appExit` 是本插件未在 `inject` 中声明的可选宿主值,上下文代理会把 `ctx.appExit` 解析为 `undefined`——按属性读取会**在每次重启和关机时静默跳过优雅销毁**,直接走 `process.exit` 硬杀(丢失树销毁、存储 flush、端口释放)。官方读取方(`dsh-cmdline`、`dsh-headless`)同样走 `ctx.get`
+- **优雅退出有界**:请求 `appExit` 后,若进程仍存活,15 秒看门狗会硬退出。DSH 以自身 5 秒上限销毁树,但该上限只在**销毁仍在进行**时强杀——若销毁提前 resolve,进程就被交给事件循环自行结束,而此时只要有一个残留句柄(后台任务、MCP 子进程、插件自有监听),循环就会活过 helper 的 30 秒耐心,helper 随即放弃且**不再拉起新进程**,用户就落得没有服务。看门狗保证重启始终落在 helper 耐心之内
 
 ## 安全
 
@@ -104,6 +106,7 @@ toast。这是**纯 UI 提示**:不会向任何会话日志写入内容。(此�
 
 机制:
 - 启动时若消费到重启 marker,`/health` 会报告 `restarted: true, fromInstanceId: <old>`
+- `/health` 还会报告 `appExit: "available" | "missing"`——启动器提供的退出通道在当前宿主是否真的可解析。`missing` 意味着每次重启都退化为 `process.exit`(无优雅销毁);该字段把"重启卡 30 秒"变成一次请求即可确诊
 - 客户端加载后查询一次 `/health`;若 `restarted` 为真则显示 toast,然后通过
   `POST /api/dsh-power-button/notice-shown` 确认,避免刷新后重复弹出
 - 由于确认消息完全不触碰会话文件,重启**不再可能损坏会话日志**或留下未配对事件
@@ -113,7 +116,7 @@ toast。这是**纯 UI 提示**:不会向任何会话日志写入内容。(此�
 ```sh
 npm run build        # tsdown:host + client bundle
 npm run typecheck    # tsc --noEmit
-npm test             # vitest:marker 生命周期、delayMs 下限、argv 脱敏、日志清理
+npm test             # vitest:marker 生命周期、delayMs 下限、argv 脱敏、日志清理、退出通道
 ```
 
 测试通过 vitest setup 文件隔离 `DSH_HOME`,不会触碰真实的 `~/.dsh`。

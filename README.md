@@ -86,6 +86,8 @@ Design notes (from real issues hit during development):
 - The helper is a **real `.cjs` file**, not `node -e`: multi-line `node -e` scripts are mangled by Windows `CreateProcess` and die with a silent `SyntaxError`.
 - Restart success is confirmed by a per-process `instanceId` that must **change** (old → new), so a brief outage alone never fakes success.
 - **Durable-write quiescence**: after the old process exits and the port frees, the helper polls every session log's `(size, mtimeMs)` until two consecutive samples are identical (bounded at ~15s) before relaunching. The old process's session write-behind buffer can keep draining after its main loop exits; relaunching into a file that is still being appended interleaves stale seq numbers and corrupts the session — this check closes that window.
+- **The launcher's exit request is read as a service, not a property**: it lives at `ctx.get('appExit')`. `appExit` is an optional host value this plugin does not declare in `inject`, so the context proxy resolves `ctx.appExit` to `undefined` — reading it as a property silently skipped graceful disposal on *every* restart and shutdown, hard-killing through `process.exit` instead (losing the tree teardown, the storage flush, and the port release). Official readers (`dsh-cmdline`, `dsh-headless`) go through `ctx.get` for the same reason.
+- **Graceful exit is bounded**: after requesting `appExit`, a 15s watchdog hard-exits if the process is still alive. DSH disposes the tree under its own 5s cap, but that cap only forces exit while disposal is *still running* — a disposal that resolves early leaves the process to end on its own, and a single lingering handle (background job, MCP child, plugin-owned listener) can then keep the event loop alive past the helper's 30s patience, at which point the helper gives up **without relaunching** and the user is left with no server. The watchdog keeps the restart inside the helper's patience either way.
 
 ## Safety
 
@@ -109,6 +111,10 @@ and could corrupt large sessions, so it was removed. Tracked upstream:
 Mechanics:
 - On boot, if the restart marker was consumed, `/health` reports
   `restarted: true, fromInstanceId: <old>`.
+- `/health` also reports `appExit: "available" | "missing"` — whether the
+  launcher-provided exit channel actually resolves in this host. `missing`
+  means every restart falls back to `process.exit` (no graceful disposal), so
+  the field turns a 30s restart stall into a one-request diagnosis.
 - The client checks `/health` once after load; when `restarted` is true it
   shows the toast, then ACKs via `POST /api/dsh-power-button/notice-shown`
   so a later refresh does not re-show it.
@@ -120,7 +126,7 @@ Mechanics:
 ```sh
 npm run build        # tsdown: host + client bundle
 npm run typecheck    # tsc --noEmit
-npm test             # vitest: marker lifecycle, delayMs clamp, argv redaction, log pruning
+npm test             # vitest: marker lifecycle, delayMs clamp, argv redaction, log pruning, exit channel
 ```
 
 Tests isolate `DSH_HOME` via a vitest setup file, so they never touch your
