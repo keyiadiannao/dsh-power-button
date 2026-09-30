@@ -18,9 +18,24 @@ declare const Config: z<Config>;
 declare function markerPath(): string;
 /** Record restart intent. Exported for tests (isolated via DSH_HOME). */
 declare function writeMarker(data: Record<string, unknown>): void;
-/** Whether THIS process is the freshly-restarted instance. Exported for tests. */
+/**
+ * Whether THIS process is the freshly-restarted instance. Exported for tests.
+ *
+ * Two marker generations are accepted:
+ *  - **v2** (current): the helper writes the marker BEFORE spawning the new
+ *    process and binds it to that boot with a `DSH_POWER_RESTART_ID` token in
+ *    the child's environment. A marker only counts when the env token matches,
+ *    so a manual boot can never claim a restart — and because the marker
+ *    already exists when the child starts, the new instance can never read
+ *    "no marker yet" (the v1 race, where the helper confirmed the relaunch
+ *    only after the child had spawned).
+ *  - **v1** (plugin 0.2.2 helpers): the helper confirmed the relaunch AFTER
+ *    spawning by recording the exact child pid. Still accepted so the first
+ *    restart performed by a pre-upgrade detached helper still reports.
+ */
 declare function consumeRestartConfirmation(): {
   fromInstanceId: string;
+  restartId?: string;
 } | null;
 /**
  * Redact credential-shaped content from a command line before logging.

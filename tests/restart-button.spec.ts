@@ -5,7 +5,7 @@ import { join } from 'node:path'
 // RUNTIME_DIR (captured at module load) points at an isolated temp dir.
 const testHome = process.env.DSH_HOME as string
 
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
@@ -128,6 +128,86 @@ describe('restart marker lifecycle', () => {
     const result = consumeRestartConfirmation()
     expect(result).toBeNull()
     expect(existsSync(markerPath())).toBe(false)
+  })
+})
+
+describe('restart marker lifecycle v2 (launch token)', () => {
+  afterEach(() => {
+    delete process.env.DSH_POWER_RESTART_ID
+  })
+
+  it('accepts a v2 marker bound to the matching launch env token', () => {
+    // A v2 helper writes the marker BEFORE spawning the child and hands it the
+    // restartId as a launch env token, so the relaunched process claims the
+    // restart even when it boots before any post-spawn write could land.
+    writeMarker({
+      schemaVersion: 2,
+      restartId: 'restart-1',
+      fromInstanceId: 'instance-A',
+      requestedAt: new Date().toISOString(),
+    })
+    process.env.DSH_POWER_RESTART_ID = 'restart-1'
+    const result = consumeRestartConfirmation()
+    expect(result).toEqual({ fromInstanceId: 'instance-A', restartId: 'restart-1' })
+    expect(existsSync(markerPath())).toBe(false)
+  })
+
+  it('rejects a v2 marker when the launch env token is absent (manual boot)', () => {
+    // The helper died before spawning and left its pre-spawn marker behind, or
+    // a manual boot starts with the marker still on disk: without the token it
+    // must not claim the restart, and the leftover marker is cleared.
+    writeMarker({
+      schemaVersion: 2,
+      restartId: 'restart-1',
+      fromInstanceId: 'instance-A',
+      requestedAt: new Date().toISOString(),
+    })
+    const result = consumeRestartConfirmation()
+    expect(result).toBeNull()
+    expect(existsSync(markerPath())).toBe(false)
+  })
+
+  it('rejects a v2 marker whose token does not match this boot', () => {
+    writeMarker({
+      schemaVersion: 2,
+      restartId: 'restart-1',
+      fromInstanceId: 'instance-A',
+      requestedAt: new Date().toISOString(),
+    })
+    process.env.DSH_POWER_RESTART_ID = 'restart-OTHER'
+    const result = consumeRestartConfirmation()
+    expect(result).toBeNull()
+    expect(existsSync(markerPath())).toBe(false)
+  })
+
+  it('keeps accepting a v1 marker so a pre-upgrade helper still reports', () => {
+    // First restart after upgrading the plugin: the detached helper still
+    // running is the 0.2.2 one, which confirms the relaunch post-spawn with
+    // newPid/relaunchedAt and sets no env token. That generation must keep
+    // working — downgrade/upgrade boundaries are exactly where toasts vanish.
+    writeMarker({
+      fromInstanceId: 'instance-A',
+      requestedAt: new Date().toISOString(),
+      newPid: process.pid,
+      relaunchedAt: new Date().toISOString(),
+    })
+    const result = consumeRestartConfirmation()
+    expect(result).toEqual({ fromInstanceId: 'instance-A' })
+    expect(existsSync(markerPath())).toBe(false)
+  })
+
+  it('deletes the launch token from the environment after reading it', () => {
+    // The token is launch-scoped: leaving it in the environment would leak it
+    // to MCP children and let a LATER boot on the same process re-judge it.
+    writeMarker({
+      schemaVersion: 2,
+      restartId: 'restart-1',
+      fromInstanceId: 'instance-A',
+      requestedAt: new Date().toISOString(),
+    })
+    process.env.DSH_POWER_RESTART_ID = 'restart-1'
+    expect(consumeRestartConfirmation()).not.toBeNull()
+    expect(process.env.DSH_POWER_RESTART_ID).toBeUndefined()
   })
 })
 

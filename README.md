@@ -109,6 +109,15 @@ and could corrupt large sessions, so it was removed. Tracked upstream:
 [deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802).)
 
 Mechanics:
+- The helper writes the restart marker **before** spawning the new process and
+  hands it a `DSH_POWER_RESTART_ID` launch token in the child's environment, so
+  the relaunched instance can claim the restart no matter how early it boots
+  (an earlier protocol confirmed the relaunch only after the child spawned, and
+  a fast boot could read "no marker yet" and miss it).
+- On boot the plugin accepts the current **v2** marker only when the launch
+  token matches, so a manual boot never misreports a restart; the previous
+  **v1** confirmation (helper-recorded child pid) is still accepted, keeping
+  restarts performed by a pre-upgrade 0.2.2 helper working across the upgrade.
 - On boot, if the restart marker was consumed, `/health` reports
   `restarted: true, fromInstanceId: <old>`.
 - `/health` also reports `appExit: "available" | "missing"` — whether the

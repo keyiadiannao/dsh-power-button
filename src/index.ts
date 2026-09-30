@@ -110,7 +110,7 @@ const INSTANCE_ID = randomUUID()
 /** Set at apply time when this process is the freshly-restarted instance:
  * health reports `restarted: true, fromInstanceId: <old>` so a /restart
  * command, the model tool, or a UI click can be confirmed after the fact. */
-let restartConfirmation: { fromInstanceId: string } | null = null
+let restartConfirmation: { fromInstanceId: string, restartId?: string } | null = null
 
 /** Unique helper file + per-pid log so concurrent DSH instances (e.g. a
  * profile on :3080 and the test copy on :3081) cannot overwrite each other's
@@ -119,8 +119,9 @@ const HELPER_FILE = path.join(RUNTIME_DIR, `dsh-restart-helper-${process.pid}-${
 const LOG_FILE = path.join(RUNTIME_DIR, `restart-helper-${process.pid}.log`)
 
 /** Restart marker: durable evidence that a restart happened and the current
- * process is the NEW instance. Written by restartDsh (intent), updated by the
- * helper (relaunch confirmation), read by the new process at apply time.
+ * process is the NEW instance. Written by restartDsh (intent), rewritten by
+ * the helper as a v2 marker bound to a launch env token BEFORE it spawns the
+ * new process, read by the new process at apply time.
  * Lets a /restart command, the model tool, or a UI click answer the question
  * "did it really restart?" — the new instance reports
  * `restarted: true, fromInstanceId: <old>` on /health. Keyed by port. */
@@ -140,29 +141,50 @@ export function writeMarker(data: Record<string, unknown>): void {
   } catch { /* best-effort */ }
 }
 
-/** Whether THIS process is the freshly-restarted instance. Exported for tests. */
-export function consumeRestartConfirmation(): { fromInstanceId: string } | null {
+/**
+ * Whether THIS process is the freshly-restarted instance. Exported for tests.
+ *
+ * Two marker generations are accepted:
+ *  - **v2** (current): the helper writes the marker BEFORE spawning the new
+ *    process and binds it to that boot with a `DSH_POWER_RESTART_ID` token in
+ *    the child's environment. A marker only counts when the env token matches,
+ *    so a manual boot can never claim a restart — and because the marker
+ *    already exists when the child starts, the new instance can never read
+ *    "no marker yet" (the v1 race, where the helper confirmed the relaunch
+ *    only after the child had spawned).
+ *  - **v1** (plugin 0.2.2 helpers): the helper confirmed the relaunch AFTER
+ *    spawning by recording the exact child pid. Still accepted so the first
+ *    restart performed by a pre-upgrade detached helper still reports.
+ */
+export function consumeRestartConfirmation(): { fromInstanceId: string, restartId?: string } | null {
+  // Read-and-delete the launch token FIRST: it belongs to this boot's judgment
+  // only, and must not leak to MCP children or survive into a later decision.
+  const envRestartId = process.env.DSH_POWER_RESTART_ID
+  delete process.env.DSH_POWER_RESTART_ID
   const marker = readMarker()
   if (marker === null) return null
   const oldId = marker.fromInstanceId
-  const relaunched = typeof marker.relaunchedAt === 'string'
-    && Number.isInteger(marker.newPid)
-    && (marker.newPid as number) === process.pid
-  if (typeof oldId !== 'string' || oldId === INSTANCE_ID || !relaunched) {
-    // Stale, self-referential, or intent-only marker (the helper wrote it but
-    // never confirmed a relaunch — e.g. the helper died before spawning, and
-    // this process is a MANUAL boot): clear it and report nothing. Without
-    // the relaunchedAt/newPid check, a stale intent marker would make a
-    // manual boot falsely report "restarted" and show the "已重启" toast.
+  if (typeof oldId !== 'string' || oldId === INSTANCE_ID) {
+    // Stale or self-referential marker: clear it and report nothing.
     try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
     return null
   }
-  // This is the exact process the helper spawned (newPid === process.pid),
-  // so it IS the freshly-restarted instance. Consume the marker NOW so a
-  // LATER ordinary boot of this profile cannot mistake itself for the
-  // restarted instance: B restarts from A, exits normally, then a manual C
-  // boot must NOT report "restarted from A".
+  if (marker.schemaVersion === 2 && typeof marker.restartId === 'string') {
+    try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
+    // Without the matching launch token this is an unrelaunched intent (the
+    // helper died before spawning) or a MANUAL boot: neither may claim the
+    // restart, and the leftover marker is cleared so it cannot linger.
+    if (envRestartId !== undefined && marker.restartId === envRestartId) {
+      return { fromInstanceId: oldId, restartId: marker.restartId }
+    }
+    return null
+  }
+  // v1: only the exact process the helper spawned may claim the restart.
+  const relaunched = typeof marker.relaunchedAt === 'string'
+    && Number.isInteger(marker.newPid)
+    && (marker.newPid as number) === process.pid
   try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
+  if (!relaunched) return null
   return { fromInstanceId: oldId }
 }
 
@@ -620,6 +642,7 @@ function sessionsQuiescent(maxWaitMs) {
     const out = fs.openSync(SERVER_LOG, 'a');
     const child = spawn(relaunch[0], relaunch.slice(1), {
       cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+      env: Object.assign({}, process.env, { DSH_POWER_RESTART_ID: RESTART_ID }),
     });
     const spawned = await new Promise((resolve) => {
       child.once('spawn', () => resolve(true));
@@ -673,6 +696,19 @@ function sessionsQuiescent(maxWaitMs) {
     const relaunchExec = relaunch[0] ?? '';
     const relaunchScript = relaunch.find((a) => /(^|[\\/])bin\.(ts|js)$/.test(a)) ?? '';
     log('relaunching: exec=' + relaunchExec + ' script=' + relaunchScript + ' argc=' + relaunch.length);
+    // Bind the relaunch to THIS restart BEFORE any child can exist: the marker
+    // carries the restartId and the child inherits it as a launch env token,
+    // so the new process can claim the restart no matter how early it boots.
+    // (The previous protocol confirmed the relaunch in the marker only AFTER
+    // the child spawned — a fast boot could read "no marker yet" and miss it.)
+    try {
+      fs.writeFileSync(MARKER, JSON.stringify({
+        schemaVersion: 2,
+        restartId: RESTART_ID,
+        fromInstanceId: OLD_INSTANCE,
+        requestedAt: REQUESTED_AT,
+      }), 'utf8');
+    } catch {}
     // Retry only when NO process was created. Once a process exists, starting
     // another one would race the first for the port.
     let child = null;
@@ -686,16 +722,6 @@ function sessionsQuiescent(maxWaitMs) {
       fail('relaunch-failed', 'no new process after ' + RELAUNCH_RETRIES + ' spawn attempts');
       return;
     }
-    // Confirm the relaunch in the marker so the new process can prove it
-    // is the restarted instance.
-    try {
-      fs.writeFileSync(MARKER, JSON.stringify({
-        fromInstanceId: OLD_INSTANCE,
-        requestedAt: new Date().toISOString(),
-        newPid: child.pid,
-        relaunchedAt: new Date().toISOString(),
-      }), 'utf8');
-    } catch {}
     const health = await waitForReady(child);
     if (health === null) {
       fail('health-timeout', 'new process did not answer /health within ' + READY_WAIT_MS + 'ms');
@@ -921,7 +947,9 @@ export function apply(ctx: any, config: Config) {
   restartConfirmation = consumeRestartConfirmation()
   if (restartConfirmation !== null) {
     try {
-      appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${restartConfirmation.fromInstanceId} thisInstanceId=${INSTANCE_ID}\n`)
+      appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${restartConfirmation.fromInstanceId}`
+        + (restartConfirmation.restartId !== undefined ? ` restartId=${restartConfirmation.restartId}` : '')
+        + ` thisInstanceId=${INSTANCE_ID}\n`)
     } catch { /* ignore */ }
     // The confirmation is now UI-only: the client shows a "已重启" toast
     // when /health reports `restarted: true` (see src/client/RestartNotice.tsx).
