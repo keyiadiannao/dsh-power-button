@@ -1,0 +1,35 @@
+# CI for dsh-power-button. The committed `lib/` artifacts are what git
+# installs run, so the pipeline enforces that they are byte-fresh: build must
+# produce zero diff against what is checked in. The runtime acceptance suite
+# spawns real processes on every OS — exactly the layer (detached processes,
+# pid liveness, port release) that unit tests cannot prove.
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Windows runners default to autocrlf, which would rewrite the checked-in
+      # LF artifacts and make the lib-diff gate fail spuriously.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      - name: committed lib/ matches the build
+        run: git diff --exit-code -- lib
