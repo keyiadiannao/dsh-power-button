@@ -44,7 +44,7 @@
  * @module dsh-power-button
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import { createRequire } from 'node:module'
@@ -334,11 +334,127 @@ try {
   appendLog(LOG_FILE, `${new Date().toISOString()} loaded ${bootBreadcrumb()}\n`)
 } catch { /* ignore */ }
 
+// ---------------------------------------------------------------------------
+// Restart v2 handshake
+// ---------------------------------------------------------------------------
+// This process may not schedule its own exit until the helper has proved, in
+// order, that (1) the OS created it, (2) it ran far enough to take the job, and
+// (3) it read the Host's COMMIT and acknowledged the handoff. An exit with
+// nobody left to relaunch is the one outcome the UI cannot recover from, so
+// every failure before (3) leaves this process running.
+
+/** How long the Host waits for the helper to be created, then to ARM. */
+const HELPER_ARM_TIMEOUT_MS = 5_000
+/** How long the Host waits for the helper to acknowledge the COMMIT. */
+const HELPER_COMMIT_TIMEOUT_MS = 5_000
+/** How long the generated helper waits for the Host's COMMIT before abandoning. */
+const HELPER_COMMIT_WAIT_MS = 30_000
+/** How long the generated helper waits for the relaunched DSH to answer /health. */
+const HELPER_READY_WAIT_MS = 60_000
+/** Schema version of the handshake status records (not the marker's). */
+const RESTART_SCHEMA_VERSION = 2
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => { setTimeout(resolve, ms) })
+}
+
+/** Directory holding per-restart handshake files. */
+function restartDir(): string {
+  return path.join(RUNTIME_DIR, 'power-restart')
+}
+
+function statusPathFor(restartId: string): string {
+  return path.join(restartDir(), `${restartId}.status.json`)
+}
+
+function commitPathFor(restartId: string): string {
+  return path.join(restartDir(), `${restartId}.commit.json`)
+}
+
+/** Rolling record of the most recent restart's outcome. Keyed by port. */
+function lastRestartPath(port: number): string {
+  return path.join(RUNTIME_DIR, `dsh-power-restart-last-${port}.json`)
+}
+
+function readJsonFile(file: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'))
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null
+  } catch {
+    return null
+  }
+}
+
+/** Write JSON through a temp file + rename so a reader never observes a partial record. */
+function writeJsonAtomic(file: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(value), { encoding: 'utf8', mode: 0o600 })
+  try {
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    try { fs.unlinkSync(tmp) } catch { /* the rename already failed; the temp file is the lesser problem */ }
+    throw error
+  }
+}
+
 /**
- * Relaunch DSH. Returns immediately; the actual restart happens in a helper
- * that is fully detached from this process tree.
+ * Wait for the helper process to exist. Node reports several launch failures
+ * asynchronously on `error` instead of throwing from `spawn()`, so `spawn` is
+ * the only positive confirmation that a process was created.
  */
-function restartDsh(ctx: any, delayMs = 1500) {
+async function waitForHelperSpawn(helper: ChildProcess): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    helper.once('spawn', () => { resolve() })
+    helper.once('error', (error) => { reject(error) })
+  })
+}
+
+/**
+ * Poll the helper's status record until `predicate` holds. Matching on both
+ * restartId and helper pid keeps a stale record from an earlier attempt from
+ * satisfying a later handshake, and a helper that died can never advance its
+ * own record, so its exit aborts the wait immediately.
+ */
+async function waitForHelperStatus(
+  helper: ChildProcess,
+  restartId: string,
+  predicate: (status: Record<string, unknown>) => boolean,
+  timeoutMs: number,
+): Promise<Record<string, unknown>> {
+  const file = statusPathFor(restartId)
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    const status = readJsonFile(file)
+    if (
+      status !== null
+      && status.restartId === restartId
+      && status.helperPid === helper.pid
+      && predicate(status)
+    ) return status
+    if (helper.exitCode !== null || helper.signalCode !== null) {
+      throw new Error(`restart helper exited before completing the handshake (code=${String(helper.exitCode)})`)
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`restart helper did not complete the handshake within ${String(timeoutMs)}ms`)
+    }
+    await sleep(50)
+  }
+}
+
+/**
+ * Relaunch DSH through a detached helper.
+ *
+ * Resolves only after the helper has taken ownership, at which point this
+ * process schedules its own exit. Every failure before that point resolves
+ * `ok: false` and leaves this process running: the caller must be able to
+ * report a failed restart instead of ending up with no process at all.
+ */
+async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string }> {
+  const restartId = randomUUID()
+  let helper: ChildProcess | undefined
   try {
     const port = resolvePort(ctx)
     // Record restart intent: the new process reads this to confirm it IS the
@@ -354,16 +470,26 @@ function restartDsh(ctx: any, delayMs = 1500) {
     const helperScript = `'use strict';
 const { spawn } = require('node:child_process');
 const net = require('node:net');
+const http = require('node:http');
 const fs = require('node:fs');
+const nodePath = require('node:path');
 const relaunch = ${relaunch};
 const cwd = ${JSON.stringify(cwd)};
 const PORT = ${port};
 const OLD_PID = ${process.pid};
 const OLD_INSTANCE = ${JSON.stringify(INSTANCE_ID)};
+const RESTART_ID = ${JSON.stringify(restartId)};
 const MARKER = ${JSON.stringify(markerPath())};
+const STATUS = ${JSON.stringify(statusPathFor(restartId))};
+const LAST_STATUS = ${JSON.stringify(lastRestartPath(port))};
+const COMMIT = ${JSON.stringify(commitPathFor(restartId))};
 const LOG = ${JSON.stringify(LOG_FILE)};
 const SERVER_LOG = ${JSON.stringify(serverLog)};
 const SESSIONS_ROOT = ${JSON.stringify(path.join(RUNTIME_DIR, 'sessions'))};
+const COMMIT_WAIT_MS = ${HELPER_COMMIT_WAIT_MS};
+const READY_WAIT_MS = ${HELPER_READY_WAIT_MS};
+const RELAUNCH_RETRIES = 3;
+const REQUESTED_AT = ${JSON.stringify(new Date().toISOString())};
 function log(m) {
   try { fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\\n'); } catch {}
 }
@@ -387,7 +513,6 @@ function portFree(p) {
 // until two consecutive samples are identical: only then is the disk quiescent.
 // Bounded (~15s): never block the restart forever on a stuck writer.
 function sessionsQuiescent(maxWaitMs) {
-  const nodePath = require('node:path');
   const walk = (dir, out) => {
     let entries;
     try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
@@ -418,45 +543,78 @@ function sessionsQuiescent(maxWaitMs) {
     tick();
   });
 }
-(async () => {
-  log('helper up: old pid ' + OLD_PID + ', waiting for it to exit');
-  let gone = false;
-  for (let i = 0; i < 60; i++) {
-    if (pidGone(OLD_PID)) { gone = true; break; }
-    await new Promise((r) => setTimeout(r, 500));
+(function () {
+  function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+  function cleanup() { try { fs.unlinkSync(__filename); } catch {} }
+  function writeJsonAtomic(file, value) {
+    const tmp = file + '.' + process.pid + '.' + Math.random().toString(16).slice(2) + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(value), { encoding: 'utf8', mode: 0o600 });
+    try { fs.renameSync(tmp, file); }
+    catch (e) { try { fs.unlinkSync(tmp); } catch {} throw e; }
   }
-  if (!gone) { log('old process never exited - giving up'); cleanup(); return; }
-  log('old pid gone, waiting for port ' + PORT + ' to free');
-  let freed = false;
-  for (let i = 0; i < 60; i++) {
-    if (await portFree(PORT)) { freed = true; break; }
-    await new Promise((r) => setTimeout(r, 500));
+  let status = {
+    schemaVersion: ${RESTART_SCHEMA_VERSION},
+    restartId: RESTART_ID,
+    port: PORT,
+    oldPid: OLD_PID,
+    fromInstanceId: OLD_INSTANCE,
+    requestedAt: REQUESTED_AT,
+  };
+  function patchStatus(patch) {
+    status = Object.assign({}, status, patch, { updatedAt: new Date().toISOString() });
+    try { writeJsonAtomic(STATUS, status); } catch {}
+    try { writeJsonAtomic(LAST_STATUS, status); } catch {}
   }
-  if (!freed) { log('port never freed - giving up'); cleanup(); return; }
-  await new Promise((r) => setTimeout(r, 500)); // settle: let the socket fully release
-  // Wait for the old process's session write-behind to drain completely
-  // (durable files stable) before the new process touches them. This closes
-  // the restart-time corruption window: the new instance must never read a
-  // session file the old one is still appending to.
-  const quiescent = await sessionsQuiescent(15000);
-  log(quiescent ? 'session logs quiescent' : 'session logs still moving after 15s - proceeding anyway');
-  // Relaunch breadcrumb with an ALLOWLIST only: the full argv is never logged
-  // (plugin CLI args can carry credentials, and even a good redactor is one
-  // regex away from leaking a value — same rule as the host boot breadcrumb).
-  const relaunchExec = relaunch[0] ?? '';
-  const relaunchScript = relaunch.find((a) => /(^|[\\/])bin\.(ts|js)$/.test(a)) ?? '';
-  log('relaunching: exec=' + relaunchExec + ' script=' + relaunchScript + ' argc=' + relaunch.length);
-  const out = fs.openSync(SERVER_LOG, 'a');
-  // spawn() reports many failures asynchronously ('error'), not synchronously;
-  // wait for 'spawn' to confirm the new process is actually up, retry with
-  // short backoff, and only then clean up the helper.
-  const RELAUNCH_RETRIES = 3;
-  async function tryRelaunch(attempt) {
-    if (attempt > RELAUNCH_RETRIES) {
-      log('relaunch failed after ' + RELAUNCH_RETRIES + ' attempts - giving up');
-      cleanup();
-      return;
+  function fail(code, message) {
+    patchStatus({ stage: 'failed', failure: { code: code, message: message } });
+    log('failed: ' + code + ' - ' + message);
+    cleanup();
+  }
+  // The Host writes COMMIT only after it has confirmed this helper is armed;
+  // reading it is what authorises the relaunch. Without it the Host is still
+  // alive and still owns the restart, so relaunching would race it for the port.
+  async function waitForCommit() {
+    const deadline = Date.now() + COMMIT_WAIT_MS;
+    while (Date.now() < deadline) {
+      let data = null;
+      try { data = JSON.parse(fs.readFileSync(COMMIT, 'utf8')); } catch {}
+      if (data && data.restartId === RESTART_ID) return true;
+      await sleep(50);
     }
+    return false;
+  }
+  function getHealth() {
+    return new Promise((resolve) => {
+      const req = http.get({
+        host: '127.0.0.1', port: PORT, path: '/api/dsh-power-button/health', timeout: 2000,
+      }, (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => { try { resolve(JSON.parse(body)); } catch { resolve(null); } });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
+  }
+  // A successful spawn proves an OS process exists, not that DSH started: a
+  // bad config crashes the new process long after 'spawn' fired. Require a
+  // DIFFERENT instanceId on /health before calling the restart complete.
+  async function waitForReady(child) {
+    const deadline = Date.now() + READY_WAIT_MS;
+    while (Date.now() < deadline) {
+      if (child.exitCode !== null) return null;
+      const health = await getHealth();
+      if (health && health.ok === true
+        && typeof health.instanceId === 'string'
+        && health.instanceId !== OLD_INSTANCE) return health;
+      await sleep(250);
+    }
+    return null;
+  }
+  async function trySpawnOnce(attempt) {
+    patchStatus({ stage: 'launching', attempt: attempt });
+    const out = fs.openSync(SERVER_LOG, 'a');
     const child = spawn(relaunch[0], relaunch.slice(1), {
       cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
     });
@@ -464,39 +622,119 @@ function sessionsQuiescent(maxWaitMs) {
       child.once('spawn', () => resolve(true));
       child.once('error', () => resolve(false));
     });
-    if (spawned) {
-      child.unref();
-      log('spawned pid ' + child.pid + ' (attempt ' + attempt + ')');
-      // Confirm the relaunch in the marker so the new process can prove it
-      // is the restarted instance.
-      try {
-        fs.writeFileSync(MARKER, JSON.stringify({
-          fromInstanceId: OLD_INSTANCE,
-          requestedAt: new Date().toISOString(),
-          newPid: child.pid,
-          relaunchedAt: new Date().toISOString(),
-        }), 'utf8');
-      } catch {}
-      cleanup();
-    } else {
-      log('spawn error on attempt ' + attempt + ', retrying in ' + (attempt * 800) + 'ms');
-      await new Promise((r) => setTimeout(r, attempt * 800));
-      tryRelaunch(attempt + 1);
-    }
+    if (!spawned) return null;
+    child.unref();
+    log('spawned pid ' + child.pid + ' (attempt ' + attempt + ')');
+    patchStatus({ stage: 'spawned', newPid: child.pid, spawnedAt: new Date().toISOString() });
+    return child;
   }
-  await tryRelaunch(1);
-  function cleanup() { try { fs.unlinkSync(__filename); } catch {} }
+  (async () => {
+    // ARM FIRST. Nothing else happens until the Host has been told this helper
+    // is alive and running: the Host refuses to let the old process exit
+    // without it, and that is the whole guarantee.
+    patchStatus({ stage: 'armed', helperPid: process.pid, armedAt: new Date().toISOString() });
+    log('helper up: old pid ' + OLD_PID + ', waiting for COMMIT');
+    if (!(await waitForCommit())) {
+      fail('commit-timeout', 'host never committed the restart handoff');
+      return;
+    }
+    patchStatus({ stage: 'committed', committedAt: new Date().toISOString() });
+    log('handoff committed by host, waiting for old pid to exit');
+    patchStatus({ stage: 'waiting-old-exit' });
+    let gone = false;
+    for (let i = 0; i < 60; i++) {
+      if (pidGone(OLD_PID)) { gone = true; break; }
+      await sleep(500);
+    }
+    if (!gone) { fail('old-process-still-alive', 'old process never exited'); return; }
+    patchStatus({ stage: 'waiting-port', oldExitedAt: new Date().toISOString() });
+    log('old pid gone, waiting for port ' + PORT + ' to free');
+    let freed = false;
+    for (let i = 0; i < 60; i++) {
+      if (await portFree(PORT)) { freed = true; break; }
+      await sleep(500);
+    }
+    if (!freed) { fail('port-never-freed', 'port ' + PORT + ' stayed busy'); return; }
+    await sleep(500); // settle: let the socket fully release
+    // Wait for the old process's session write-behind to drain completely
+    // (durable files stable) before the new process touches them. This closes
+    // the restart-time corruption window: the new instance must never read a
+    // session file the old one is still appending to.
+    patchStatus({ stage: 'quiescing', portFreedAt: new Date().toISOString() });
+    const quiescent = await sessionsQuiescent(15000);
+    patchStatus({ sessionQuiescent: quiescent });
+    log(quiescent ? 'session logs quiescent' : 'session logs still moving after 15s - proceeding anyway');
+    // Relaunch breadcrumb with an ALLOWLIST only: the full argv is never logged
+    // (plugin CLI args can carry credentials, and even a good redactor is one
+    // regex away from leaking a value — same rule as the host boot breadcrumb).
+    const relaunchExec = relaunch[0] ?? '';
+    const relaunchScript = relaunch.find((a) => /(^|[\\/])bin\.(ts|js)$/.test(a)) ?? '';
+    log('relaunching: exec=' + relaunchExec + ' script=' + relaunchScript + ' argc=' + relaunch.length);
+    // Retry only when NO process was created. Once a process exists, starting
+    // another one would race the first for the port.
+    let child = null;
+    for (let attempt = 1; attempt <= RELAUNCH_RETRIES; attempt++) {
+      child = await trySpawnOnce(attempt);
+      if (child !== null) break;
+      log('spawn error on attempt ' + attempt);
+      if (attempt < RELAUNCH_RETRIES) await sleep(attempt * 800);
+    }
+    if (child === null) {
+      fail('relaunch-failed', 'no new process after ' + RELAUNCH_RETRIES + ' spawn attempts');
+      return;
+    }
+    // Confirm the relaunch in the marker so the new process can prove it
+    // is the restarted instance.
+    try {
+      fs.writeFileSync(MARKER, JSON.stringify({
+        fromInstanceId: OLD_INSTANCE,
+        requestedAt: new Date().toISOString(),
+        newPid: child.pid,
+        relaunchedAt: new Date().toISOString(),
+      }), 'utf8');
+    } catch {}
+    const health = await waitForReady(child);
+    if (health === null) {
+      fail('health-timeout', 'new process did not answer /health within ' + READY_WAIT_MS + 'ms');
+      return;
+    }
+    patchStatus({ stage: 'ready', toInstanceId: health.instanceId, readyAt: new Date().toISOString() });
+    log('new process ready: instance ' + health.instanceId);
+    cleanup();
+  })().catch((e) => { fail('helper-crashed', e && e.message ? e.message : String(e)); });
 })();
 `
     fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
     // 0600: the helper embeds the full relaunch argv, which can carry
     // credentials (e.g. --api-key in a plugin CLI arg).
     fs.writeFileSync(HELPER_FILE, helperScript, { encoding: 'utf8', mode: 0o600 })
-    const helper = spawn(process.execPath, [HELPER_FILE], {
+    helper = spawn(process.execPath, [HELPER_FILE], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
     })
+    // A ChildProcess with no 'error' listener throws on an asynchronous spawn
+    // failure. waitForHelperSpawn's `once('error')` covers the launch window;
+    // this keeps a later error (a failed kill, say) from becoming an uncaught
+    // exception that takes this process down outside the exit path.
+    helper.on('error', (error: Error) => {
+      try { appendLog(LOG_FILE, `${new Date().toISOString()} restart helper error: ${String(error)}\n`) } catch { /* logging is best-effort */ }
+    })
+    // (1) The OS really created the helper. Node reports many launch failures
+    // on 'error' rather than by throwing from spawn(), so this is the only
+    // positive proof that a process exists.
+    await waitForHelperSpawn(helper)
+    // (2) The helper's own JavaScript ran far enough to take the job.
+    await waitForHelperStatus(helper, restartId, (s) => typeof s.armedAt === 'string', HELPER_ARM_TIMEOUT_MS)
+    // Hand ownership over. Only now may the helper start waiting for our exit.
+    writeJsonAtomic(commitPathFor(restartId), {
+      schemaVersion: RESTART_SCHEMA_VERSION,
+      restartId,
+      committedAt: new Date().toISOString(),
+    })
+    // (3) The helper acknowledged the handoff. Reaching here means a live
+    // process has accepted responsibility for relaunching DSH.
+    await waitForHelperStatus(helper, restartId, (s) => typeof s.committedAt === 'string', HELPER_COMMIT_TIMEOUT_MS)
     helper.unref()
     // Best-effort pre-exit durability checkpoint: flush every live session
     // before the exit timer starts so the visible write-behind window is
@@ -524,9 +762,15 @@ function sessionsQuiescent(maxWaitMs) {
     } catch {
       scheduleExit()
     }
-    return { ok: true, action: 'restart', note: isEnglishLocale(ctx) ? 'DeepSeek Harness is restarting' : 'DeepSeek Harness 正在重启' }
+    return { ok: true, action: 'restart', restartId, note: isEnglishLocale(ctx) ? 'DeepSeek Harness is restarting' : 'DeepSeek Harness 正在重启' }
   } catch (e) {
-    return { ok: false, action: 'restart', error: e instanceof Error ? e.message : String(e) }
+    // Nothing before the handshake completed may end this process: an exit
+    // with no successor is the one outcome the UI cannot recover from. Stop
+    // the helper too, so a half-armed one cannot linger and relaunch later.
+    if (helper !== undefined) {
+      try { helper.kill() } catch { /* already exited; nothing left to stop */ }
+    }
+    return { ok: false, action: 'restart', restartId, error: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -698,7 +942,7 @@ export function apply(ctx: any, config: Config) {
           if (!claimPowerTransition('restart')) {
             return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition}` })
           }
-          const result = restartDsh(ctx)
+          const result = await restartDsh(ctx)
           if (!result.ok) releasePowerTransition()
           return json(res, result.ok ? 200 : 500, result)
         }
@@ -797,7 +1041,7 @@ export function apply(ctx: any, config: Config) {
           if (!claimPowerTransition('restart')) {
             return { ok: false, error: `power transition already in progress: ${powerTransition}` }
           }
-          const result = restartDsh(ctx, clamped)
+          const result = await restartDsh(ctx, clamped)
           if (!result.ok) releasePowerTransition()
           return result
         },
@@ -833,7 +1077,7 @@ export function apply(ctx: any, config: Config) {
           if (!claimPowerTransition('restart')) {
             return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
           }
-          const result = restartDsh(ctx)
+          const result = await restartDsh(ctx)
           if (!result.ok) releasePowerTransition()
           return result.ok
             ? { kind: 'success', text: result.note }
