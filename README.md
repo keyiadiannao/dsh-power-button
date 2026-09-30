@@ -135,8 +135,15 @@ Mechanics:
 ```sh
 npm run build        # tsdown: host + client bundle
 npm run typecheck    # tsc --noEmit
-npm test             # vitest: marker lifecycle, delayMs clamp, argv redaction, log pruning, exit channel
+npm test             # vitest: marker lifecycle (v1 + v2 launch token), delayMs clamp, argv redaction, log pruning, exit channel
 ```
+
+`tests/restart-runtime.spec.ts` is a process-level acceptance suite: it
+executes the EXACT helper script the host generates (`buildRestartHelper`) as
+a real process against two fake DSH targets on a real TCP port, and pins the
+four outcomes that unit tests cannot prove — the full relaunch chain, no
+relaunch without the host's COMMIT, spawn retries bounded at three, and the
+health gate refusing an old-instanceId answer.
 
 Tests isolate `DSH_HOME` via a vitest setup file, so they never touch your
 real `~/.dsh`. Artifacts: host at `lib/index.js`, client bundle at

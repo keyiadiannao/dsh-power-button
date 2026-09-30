@@ -89,6 +89,33 @@ declare function requestAppExit(ctx: any, fallbackExit?: () => void, watchdogMs?
 /** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
  * accumulate one file per restart forever. Best-effort, never throws. */
 declare function pruneOldRestartLogs(maxAgeDays?: number): void;
+/** Everything the generated helper needs; every path must be absolute.
+ * Exported so the runtime acceptance tests can drive the EXACT shipped helper
+ * script against fake target processes instead of a real DSH instance. */
+interface RestartHelperPayload {
+  relaunch: readonly string[];
+  cwd: string;
+  port: number;
+  oldPid: number;
+  oldInstanceId: string;
+  restartId: string;
+  markerFile: string;
+  statusFile: string;
+  lastStatusFile: string;
+  commitFile: string;
+  logFile: string;
+  serverLog: string;
+  sessionsRoot: string;
+  commitWaitMs: number;
+  readyWaitMs: number;
+  requestedAt: string;
+}
+/**
+ * Generate the detached restart helper. A pure function of the payload: the
+ * runtime acceptance tests execute its output directly, so what the E2E
+ * drives is byte-for-byte what a real restart runs.
+ */
+declare function buildRestartHelper(p: RestartHelperPayload): string;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, apply, clampModelDelayMs, consumeRestartConfirmation, inject, markerPath, name, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, RestartHelperPayload, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, inject, markerPath, name, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };

@@ -466,52 +466,57 @@ async function waitForHelperStatus(
   }
 }
 
+/** Everything the generated helper needs; every path must be absolute.
+ * Exported so the runtime acceptance tests can drive the EXACT shipped helper
+ * script against fake target processes instead of a real DSH instance. */
+export interface RestartHelperPayload {
+  relaunch: readonly string[]
+  cwd: string
+  port: number
+  oldPid: number
+  oldInstanceId: string
+  restartId: string
+  markerFile: string
+  statusFile: string
+  lastStatusFile: string
+  commitFile: string
+  logFile: string
+  serverLog: string
+  sessionsRoot: string
+  commitWaitMs: number
+  readyWaitMs: number
+  requestedAt: string
+}
+
 /**
- * Relaunch DSH through a detached helper.
- *
- * Resolves only after the helper has taken ownership, at which point this
- * process schedules its own exit. Every failure before that point resolves
- * `ok: false` and leaves this process running: the caller must be able to
- * report a failed restart instead of ending up with no process at all.
+ * Generate the detached restart helper. A pure function of the payload: the
+ * runtime acceptance tests execute its output directly, so what the E2E
+ * drives is byte-for-byte what a real restart runs.
  */
-async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string }> {
-  const restartId = randomUUID()
-  let helper: ChildProcess | undefined
-  try {
-    const port = resolvePort(ctx)
-    // Record restart intent: the new process reads this to confirm it IS the
-    // restarted instance (its own instanceId differs from the recorded old).
-    writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
-    // Replay the CURRENT invocation, portably (no hard-coded paths):
-    // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
-    // script + app args. Spawned children inherit env, so any NODE_OPTIONS
-    // that launched us is preserved too.
-    const relaunch = JSON.stringify([process.execPath, ...process.execArgv, ...process.argv.slice(1)])
-    const cwd = process.cwd()
-    const serverLog = path.join(RUNTIME_DIR, 'dsh-web.log')
-    const helperScript = `'use strict';
+export function buildRestartHelper(p: RestartHelperPayload): string {
+  return `
 const { spawn } = require('node:child_process');
 const net = require('node:net');
 const http = require('node:http');
 const fs = require('node:fs');
 const nodePath = require('node:path');
-const relaunch = ${relaunch};
-const cwd = ${JSON.stringify(cwd)};
-const PORT = ${port};
-const OLD_PID = ${process.pid};
-const OLD_INSTANCE = ${JSON.stringify(INSTANCE_ID)};
-const RESTART_ID = ${JSON.stringify(restartId)};
-const MARKER = ${JSON.stringify(markerPath())};
-const STATUS = ${JSON.stringify(statusPathFor(restartId))};
-const LAST_STATUS = ${JSON.stringify(lastRestartPath(port))};
-const COMMIT = ${JSON.stringify(commitPathFor(restartId))};
-const LOG = ${JSON.stringify(LOG_FILE)};
-const SERVER_LOG = ${JSON.stringify(serverLog)};
-const SESSIONS_ROOT = ${JSON.stringify(path.join(RUNTIME_DIR, 'sessions'))};
-const COMMIT_WAIT_MS = ${HELPER_COMMIT_WAIT_MS};
-const READY_WAIT_MS = ${HELPER_READY_WAIT_MS};
+const relaunch = ${JSON.stringify(p.relaunch)};
+const cwd = ${JSON.stringify(p.cwd)};
+const PORT = ${p.port};
+const OLD_PID = ${p.oldPid};
+const OLD_INSTANCE = ${JSON.stringify(p.oldInstanceId)};
+const RESTART_ID = ${JSON.stringify(p.restartId)};
+const MARKER = ${JSON.stringify(p.markerFile)};
+const STATUS = ${JSON.stringify(p.statusFile)};
+const LAST_STATUS = ${JSON.stringify(p.lastStatusFile)};
+const COMMIT = ${JSON.stringify(p.commitFile)};
+const LOG = ${JSON.stringify(p.logFile)};
+const SERVER_LOG = ${JSON.stringify(p.serverLog)};
+const SESSIONS_ROOT = ${JSON.stringify(p.sessionsRoot)};
+const COMMIT_WAIT_MS = ${p.commitWaitMs};
+const READY_WAIT_MS = ${p.readyWaitMs};
 const RELAUNCH_RETRIES = 3;
-const REQUESTED_AT = ${JSON.stringify(new Date().toISOString())};
+const REQUESTED_AT = ${JSON.stringify(p.requestedAt)};
 function log(m) {
   try { fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\\n'); } catch {}
 }
@@ -733,6 +738,49 @@ function sessionsQuiescent(maxWaitMs) {
   })().catch((e) => { fail('helper-crashed', e && e.message ? e.message : String(e)); });
 })();
 `
+}
+
+/**
+ * Relaunch DSH through a detached helper.
+ *
+ * Resolves only after the helper has taken ownership, at which point this
+ * process schedules its own exit. Every failure before that point resolves
+ * `ok: false` and leaves this process running: the caller must be able to
+ * report a failed restart instead of ending up with no process at all.
+ */
+async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string }> {
+  const restartId = randomUUID()
+  let helper: ChildProcess | undefined
+  try {
+    const port = resolvePort(ctx)
+    // Record restart intent: the new process reads this to confirm it IS the
+    // restarted instance (its own instanceId differs from the recorded old).
+    writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
+    // Replay the CURRENT invocation, portably (no hard-coded paths):
+    // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
+    // script + app args. Spawned children inherit env, so any NODE_OPTIONS
+    // that launched us is preserved too.
+    const relaunch = JSON.stringify([process.execPath, ...process.execArgv, ...process.argv.slice(1)])
+    const cwd = process.cwd()
+    const serverLog = path.join(RUNTIME_DIR, 'dsh-web.log')
+    const helperScript = buildRestartHelper({
+      relaunch: [process.execPath, ...process.execArgv, ...process.argv.slice(1)],
+      cwd,
+      port,
+      oldPid: process.pid,
+      oldInstanceId: INSTANCE_ID,
+      restartId,
+      markerFile: markerPath(),
+      statusFile: statusPathFor(restartId),
+      lastStatusFile: lastRestartPath(port),
+      commitFile: commitPathFor(restartId),
+      logFile: LOG_FILE,
+      serverLog,
+      sessionsRoot: path.join(RUNTIME_DIR, 'sessions'),
+      commitWaitMs: HELPER_COMMIT_WAIT_MS,
+      readyWaitMs: HELPER_READY_WAIT_MS,
+      requestedAt: new Date().toISOString(),
+    })
     fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
     // 0600: the helper embeds the full relaunch argv, which can carry
     // credentials (e.g. --api-key in a plugin CLI arg).
