@@ -118,8 +118,13 @@ Mechanics:
   token matches, so a manual boot never misreports a restart; the previous
   **v1** confirmation (helper-recorded child pid) is still accepted, keeping
   restarts performed by a pre-upgrade 0.2.2 helper working across the upgrade.
-- On boot, if the restart marker was consumed, `/health` reports
-  `restarted: true, fromInstanceId: <old>`.
+- On boot, if the restart marker was consumed, `/health` reports the restart
+  **identity** — `restart: { restartId, fromInstanceId }` — permanently for
+  this process's lifetime, so the helper's ready gate (and future
+  diagnostics) can always tell a relaunched instance from a fresh boot. The
+  toast flag `restarted: true, fromInstanceId: <old>` is separate: it
+  disappears once the client ACKs via `/notice-shown`, without erasing the
+  identity.
 - `/health` also reports `appExit: "available" | "missing"` — whether the
   launcher-provided exit channel actually resolves in this host. `missing`
   means every restart falls back to `process.exit` (no graceful disposal), so

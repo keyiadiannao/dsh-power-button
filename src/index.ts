@@ -108,10 +108,14 @@ export function markerPath(): string {
  * than "saw a down, then an up" — works even if the down was missed). */
 const INSTANCE_ID = randomUUID()
 
-/** Set at apply time when this process is the freshly-restarted instance:
- * health reports `restarted: true, fromInstanceId: <old>` so a /restart
- * command, the model tool, or a UI click can be confirmed after the fact. */
-let restartConfirmation: { fromInstanceId: string, restartId?: string } | null = null
+/** Set at apply time when this process is the freshly-restarted instance.
+ * Split from the toast acknowledgement: `bootRestart` is this process's
+ * restart IDENTITY — immutable for its lifetime, reported on /health as
+ * `restart` forever, so the helper (and future diagnostics) can always tell a
+ * relaunched instance from a fresh boot. `restartNoticePending` is only the
+ * UI toast state; ACKing it (/notice-shown) must not erase the identity. */
+let bootRestart: { fromInstanceId: string, restartId?: string } | null = null
+let restartNoticePending = false
 
 /** Unique helper file + per-pid log so concurrent DSH instances (e.g. a
  * profile on :3080 and the test copy on :3081) cannot overwrite each other's
@@ -629,8 +633,11 @@ function sessionsQuiescent(maxWaitMs) {
     });
   }
   // A successful spawn proves an OS process exists, not that DSH started: a
-  // bad config crashes the new process long after 'spawn' fired. Require a
-  // DIFFERENT instanceId on /health before calling the restart complete.
+  // bad config crashes the new process long after 'spawn' fired. Require the
+  // /health identity block this restart's launch token produces: the process
+  // that answers must (a) run a DIFFERENT instanceId and (b) report THIS
+  // restartId — so a port squatter, or an instance relaunched by some other
+  // restart, can never pass as ours.
   async function waitForReady(child) {
     const deadline = Date.now() + READY_WAIT_MS;
     while (Date.now() < deadline) {
@@ -638,7 +645,8 @@ function sessionsQuiescent(maxWaitMs) {
       const health = await getHealth();
       if (health && health.ok === true
         && typeof health.instanceId === 'string'
-        && health.instanceId !== OLD_INSTANCE) return health;
+        && health.instanceId !== OLD_INSTANCE
+        && health.restart && health.restart.restartId === RESTART_ID) return health;
       await sleep(250);
     }
     return null;
@@ -1000,12 +1008,14 @@ export function apply(ctx: any, config: Config) {
   // concurrent instances never read each other's restart markers.
   CURRENT_PORT = resolvePort(ctx)
   // If the restart marker names a DIFFERENT previous instance, this process
-  // is the freshly-relaunched one — record it for /health confirmation.
-  restartConfirmation = consumeRestartConfirmation()
-  if (restartConfirmation !== null) {
+  // is the freshly-relaunched one — record the identity for /health, and mark
+  // the toast as pending until the client ACKs.
+  bootRestart = consumeRestartConfirmation()
+  restartNoticePending = bootRestart !== null
+  if (bootRestart !== null) {
     try {
-      appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${restartConfirmation.fromInstanceId}`
-        + (restartConfirmation.restartId !== undefined ? ` restartId=${restartConfirmation.restartId}` : '')
+      appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${bootRestart.fromInstanceId}`
+        + (bootRestart.restartId !== undefined ? ` restartId=${bootRestart.restartId}` : '')
         + ` thisInstanceId=${INSTANCE_ID}\n`)
     } catch { /* ignore */ }
     // The confirmation is now UI-only: the client shows a "已重启" toast
@@ -1047,24 +1057,32 @@ export function apply(ctx: any, config: Config) {
             ok: true,
             instanceId: INSTANCE_ID,
             pluginVersion: PLUGIN_VERSION,
-            lifecycle: powerTransition ?? (restartConfirmation !== null ? 'restarted' : 'ready'),
+            lifecycle: powerTransition ?? 'ready',
             // Surfaces whether the launcher-provided exit channel resolves, so
             // a host where restarts silently fall back to process.exit is
             // diagnosable from a single request instead of from a 30s stall.
             appExit: typeof ctx.get?.('appExit') === 'function' ? 'available' : 'missing',
           }
-          if (restartConfirmation !== null) {
+          // Restart IDENTITY: permanent for this process's lifetime — the
+          // helper (waitForReady) and future diagnostics read it regardless
+          // of whether the toast has been acknowledged.
+          if (bootRestart !== null) {
+            body.restart = { restartId: bootRestart.restartId, fromInstanceId: bootRestart.fromInstanceId }
+          }
+          // Toast-pending flag: cleared by /notice-shown without touching the
+          // identity above. RestartNotice reads exactly this field.
+          if (restartNoticePending && bootRestart !== null) {
             body.restarted = true
-            body.fromInstanceId = restartConfirmation.fromInstanceId
+            body.fromInstanceId = bootRestart.fromInstanceId
           }
           return json(res, 200, body)
         }
         if (sub === '/notice-shown' && req.method === 'POST') {
           // UI-only confirmation lifecycle: the client displays the "已重启"
           // toast once (from /health's `restarted` flag), then ACKs here so
-          // a later page refresh does not re-show it. Idempotent: no marker
-          // is persisted, only the in-memory confirmation is cleared.
-          restartConfirmation = null
+          // a later page refresh does not re-show it. Only the toast flag is
+          // cleared — the `restart` identity block stays on /health.
+          restartNoticePending = false
           return json(res, 200, { ok: true, action: 'notice-shown' })
         }
         json(res, 404, { ok: false, error: `no dsh-power-button endpoint ${sub}` })

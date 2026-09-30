@@ -78,7 +78,7 @@ function killPid(pid: number | undefined): void {
 
 /** Shared rig: temp home, a live old-instance target, and a generated helper
  * whose every file lands in the temp dir (never the real ~/.dsh). */
-async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: number, readyWaitMs?: number, relaunchExec?: string } = {}) {
+async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: number, readyWaitMs?: number, relaunchExec?: string, forgetRestart?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-power-e2e-'))
   const port = await freePort()
   const old = spawn(process.execPath, [TARGET, '--port', String(port), '--instance-id', OLD], { stdio: 'ignore' })
@@ -94,8 +94,10 @@ async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: numb
   const helperFile = join(home, 'helper.cjs')
   const commitFile = join(home, 'commit.json')
   const relaunchExec = opts.relaunchExec ?? process.execPath
+  const relaunchArgs = [relaunchExec, TARGET, '--port', String(port), '--instance-id', opts.relaunchInstance ?? NEW]
+  if (opts.forgetRestart) relaunchArgs.push('--forget-restart')
   writeFileSync(helperFile, buildRestartHelper({
-    relaunch: [relaunchExec, TARGET, '--port', String(port), '--instance-id', opts.relaunchInstance ?? NEW],
+    relaunch: relaunchArgs,
     cwd: home,
     port,
     oldPid: old.pid as number,
@@ -154,8 +156,12 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       // The env-token marker is written BEFORE the child spawns (schema v2).
       const marker = JSON.parse(readFileSync(rig.markerFile, 'utf8')) as Record<string, unknown>
       expect(marker).toMatchObject({ schemaVersion: 2, restartId: rig.restartId, fromInstanceId: OLD })
-      // The port now answers from the NEW instance.
-      expect((await getHealth(rig.port))?.instanceId).toBe(NEW)
+      // The port now answers from the NEW instance, carrying the restart
+      // identity this launch token produced — the same field the helper's
+      // ready gate required.
+      const health = await getHealth(rig.port)
+      expect(health?.instanceId).toBe(NEW)
+      expect((health?.restart as { restartId?: string } | undefined)?.restartId).toBe(rig.restartId)
       newPid = done?.newPid as number
     } finally {
       killPid(rig.old.pid)
@@ -212,6 +218,30 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
     // old identity, wrong target, port squatter) must fail the health gate —
     // and because a process WAS created, the helper must not retry.
     const rig = await startRidge({ relaunchInstance: OLD, readyWaitMs: 2_500 })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 30_000)
+      expect(done?.stage).toBe('failed')
+      expect((done?.failure as { code?: string } | undefined)?.code).toBe('health-timeout')
+      expect(done?.attempt).toBe(1)
+      newPid = done?.newPid as number
+    } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('refuses to declare ready when the new process cannot prove its restart identity', { timeout: 45_000 }, async () => {
+    // A different instanceId alone is not enough: the answering process must
+    // carry THIS restart's identity (consumed via the launch token). A manual
+    // boot or a foreign instance on the port fails the gate even though its
+    // instanceId differs from the old one.
+    const rig = await startRidge({ forgetRestart: true, readyWaitMs: 2_500 })
     let newPid: number | undefined
     try {
       await commitAndExitOld(rig)

@@ -14,6 +14,7 @@ function argOf(name) {
 }
 const PORT = Number(argOf('--port'))
 const INSTANCE_ID = argOf('--instance-id') ?? 'unknown-instance'
+const FORGET_RESTART = args.includes('--forget-restart')
 if (!Number.isInteger(PORT) || PORT <= 0) {
   console.error('usage: node restart-target.cjs --port <n> --instance-id <id>')
   process.exit(2)
@@ -22,8 +23,16 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? '/', 'http://x')
   if (req.method === 'GET' && url.pathname === '/api/dsh-power-button/health') {
+    // Mirror the real plugin: a process relaunched by the helper inherits
+    // DSH_POWER_RESTART_ID and reports the restart identity on /health —
+    // unless the test passes --forget-restart to simulate an instance that
+    // cannot prove its restart (manual boot, foreign instance).
+    const body = { ok: true, instanceId: INSTANCE_ID }
+    if (process.env.DSH_POWER_RESTART_ID && !FORGET_RESTART) {
+      body.restart = { restartId: process.env.DSH_POWER_RESTART_ID }
+    }
     res.writeHead(200, { 'content-type': 'application/json' })
-    res.end(JSON.stringify({ ok: true, instanceId: INSTANCE_ID }))
+    res.end(JSON.stringify(body))
     return
   }
   res.writeHead(404, { 'content-type': 'application/json' })
