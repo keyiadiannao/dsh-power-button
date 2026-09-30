@@ -11,6 +11,7 @@
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
+import { SHUTDOWN_CONFIRM_REQUEST, SHUTDOWN_CONFIRM_REQUEST_LEGACY } from '../protocol.ts'
 import { RestartButton } from './RestartButton.tsx'
 import { RestartNotice } from './RestartNotice.tsx'
 import { RestartOverlay } from './RestartOverlay.tsx'
@@ -336,10 +337,10 @@ export function onRestartChange(fn: () => void): () => void {
 // ---------------------------------------------------------------------------
 // /shutdown command → GUI confirm dialog
 // ---------------------------------------------------------------------------
-// The host `/shutdown` handler never shuts down directly: it signals
-// `SHUTDOWN_CONFIRM_PENDING` (a command/executed error text), and this client
-// shows the SAME confirm dialog as the power button. Confirm → beginPower
-// ('shutdown') POSTs the real shutdown; cancel just dismisses.
+// The host `/shutdown` handler never shuts down directly: it signals the
+// shared SHUTDOWN_CONFIRM_REQUEST protocol value through command/executed, and
+// this client shows the SAME confirm dialog as the power button. Confirm →
+// beginPower('shutdown') POSTs the real shutdown; cancel just dismisses.
 const confirmListeners = new Set<() => void>()
 let confirmVisible = false
 
@@ -370,9 +371,6 @@ export function onShutdownConfirmChange(fn: () => void): () => void {
   return () => { confirmListeners.delete(fn) }
 }
 
-/** Sentinel the host `/shutdown` handler returns to request the GUI dialog. */
-const SHUTDOWN_CONFIRM_PENDING = 'SHUTDOWN_CONFIRM_PENDING'
-
 export function apply(ctx: ClientContext & ClientServices): void {
   // Register UI strings so the button/overlay follow the DSH interface language.
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'dsh-power-button: dictionaries')
@@ -388,16 +386,21 @@ export function apply(ctx: ClientContext & ClientServices): void {
   // the wrap here so the plugin works on unmodified official DSH builds too.
   // Scope the host-container workaround to the footerActions instance that
   // contains this plugin. Sibling actions in that SAME container will also
-  // participate in wrapping; other footer containers are untouched. An id
-  // prevents duplicate <style> on hot reload.
-  const STYLE_ID = 'dsh-power-button-style'
-  let styleEl = document.getElementById(STYLE_ID) as HTMLStyleElement | null
-  if (styleEl === null) {
-    styleEl = document.createElement('style')
-    styleEl.id = STYLE_ID
-    styleEl.textContent = '[class$="_footerActions"]:has(.dsh-power-button) { flex-wrap: wrap; }'
-    document.head.appendChild(styleEl)
-  }
+  // participate in wrapping; other footer containers are untouched. The id
+  // dedupes against a hot-reload pass whose dispose never ran. (The
+  // `[class$="_footerActions"]` selector is coupled to the host's CSS-module
+  // output — a stable host hook for this does not exist yet.)
+  ctx.effect(() => {
+    const STYLE_ID = 'dsh-power-button-style'
+    let styleEl = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+    if (styleEl === null) {
+      styleEl = document.createElement('style')
+      styleEl.id = STYLE_ID
+      styleEl.textContent = '[class$="_footerActions"]:has(.dsh-power-button) { flex-wrap: wrap; }'
+      document.head.appendChild(styleEl)
+    }
+    return () => { styleEl.remove() }
+  }, 'dsh-power-button: footer wrap style')
 
   ctx.slots.inject('sidebar.footer.action', () =>
     ctx.slots.register({
@@ -436,15 +439,17 @@ export function apply(ctx: ClientContext & ClientServices): void {
       locale: NS,
     }, RestartNotice))
 
-  // /shutdown confirm dialog: the host handler signals SHUTDOWN_CONFIRM_PENDING
-  // through command/executed; this listener pops the same GUI dialog as the
-  // power button, and only a confirmed click actually shuts down.
+  // /shutdown confirm dialog: the host handler signals the shared
+  // SHUTDOWN_CONFIRM_REQUEST protocol value through command/executed; this
+  // listener pops the same GUI dialog as the power button, and only a
+  // confirmed click actually shuts down. The legacy sentinel is still
+  // accepted so a page loaded before a host upgrade keeps working.
   ctx.effect(() => ctx.on?.('command/executed', (...args: unknown[]) => {
     const name = typeof args[1] === 'string' ? args[1] : ''
     if (name !== 'shutdown') return
     const result = args[2] as { text?: unknown } | undefined
     const text = typeof result?.text === 'string' ? result.text : ''
-    if (text === SHUTDOWN_CONFIRM_PENDING) requestShutdownConfirm()
+    if (text === SHUTDOWN_CONFIRM_REQUEST || text === SHUTDOWN_CONFIRM_REQUEST_LEGACY) requestShutdownConfirm()
   }) ?? (() => {}), 'dsh-power-button: shutdown command confirm')
 
   ctx.slots.inject('shell.overlay', () =>

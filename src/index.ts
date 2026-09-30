@@ -51,6 +51,7 @@ import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
+import { SHUTDOWN_CONFIRM_REQUEST } from './protocol.ts'
 
 /** Plugin version, read from package.json so /health can report it. */
 const require = createRequire(import.meta.url)
@@ -1194,13 +1195,14 @@ export function apply(ctx: any, config: Config) {
       recordInput: false,
       async handler() {
         // Signal the client to show the GUI confirm dialog (same one the power
-        // button uses). The handler does NOT shut down here: shutdown is
-        // irreversible, so the actual POST happens only after the user clicks
-        // confirm in the dialog. If the client dialog is unavailable (e.g. a
-        // non-UI caller), the command reports pending without any side effect.
+        // button uses) via the shared SHUTDOWN_CONFIRM_REQUEST protocol value.
+        // The handler does NOT shut down here: shutdown is irreversible, so
+        // the actual POST happens only after the user clicks confirm in the
+        // dialog. If the client dialog is unavailable (e.g. a non-UI caller),
+        // the command reports pending without any side effect.
         return {
           kind: 'error',
-          text: 'SHUTDOWN_CONFIRM_PENDING',
+          text: SHUTDOWN_CONFIRM_REQUEST,
         }
       },
     })
