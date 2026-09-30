@@ -9,7 +9,7 @@
  * this plugin's host half (POST /api/dsh-power-button/{restart,shutdown}),
  * so it works standalone with no dependency on any other plugin.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { RestartButton } from './RestartButton.tsx'
 import { RestartNotice } from './RestartNotice.tsx'
@@ -35,14 +35,14 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
  * Self-contained view of the DSH slot contracts this plugin registers into, so
  * the standalone typecheck (which cannot see the host DSH SlotMap extension —
  * only the default `'root'` slot exists in the empty SlotMap) still typechecks.
- * Mirrors the declarations the host rc.8 packages actually make for these
+ * Mirrors the declarations the host UI packages actually make for these
  * additive slots. See dsh-queue-merge/src/client/index.ts for the same pattern.
  */
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
     /** Sidebar footer actions — additive list (this plugin's power button).
      *  Owner is the sidebar geometry (`wide` = expanded vs 56px rail), which
-     *  the framework injects (mirror of rc.8 SidebarFooterActionOwnerProps). */
+     *  the framework injects (mirror of SidebarFooterActionOwnerProps). */
     'sidebar.footer.action': {
       kind: 'list'
       scope: 'root'
@@ -57,14 +57,30 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Locale service shape this plugin relies on (rc.6-era client surface). */
+/** Locale service shape this plugin relies on. */
 interface LocaleServiceLike {
   register(ns: string, dicts: unknown): () => void
   snapshot?: { active?: string }
 }
 
+/** Slot registration options this plugin sets on its two entries. */
+interface SlotRegistrationOptions {
+  name: string
+  id: string
+  order?: number
+  locale?: string
+  label?: () => string
+}
+
+/** Slot registry service shape this plugin relies on. */
+interface SlotsServiceLike {
+  inject(key: string, declaration: () => unknown): unknown
+  register(options: SlotRegistrationOptions, component: unknown): unknown
+}
+
 /** Loose view of the client context services we touch (iterate-over-host drift). */
 type ClientServices = {
+  slots: SlotsServiceLike
   locale: LocaleServiceLike
   on?: (name: string, handler: (...args: unknown[]) => void) => () => void
 }

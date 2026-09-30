@@ -14,12 +14,11 @@ import type { UserConfig } from 'tsdown'
 
 /** Externals resolved from the loader module table (mirror of the checkout's PLATFORM_MODULES). */
 const CLIENT_EXTERNALS: readonly string[] = [
-  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', 'cordis',
+  'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-client-store',
   '@deepseek-ai/dsh-client-ui-slots',
-  '@deepseek-ai/dsh-client-web-react',
   '@deepseek-ai/dsh-client-ui-primitives',
-  '@deepseek-ai/dsh-client-schema-form',
-  '@deepseek-ai/dsh-client-runtime/client',
+  '@deepseek-ai/dsh-client-ui-dockkit',
 ]
 
 /** Wire/type layers a client bundle may inline. */
