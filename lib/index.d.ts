@@ -116,6 +116,40 @@ interface RestartHelperPayload {
  * drives is byte-for-byte what a real restart runs.
  */
 declare function buildRestartHelper(p: RestartHelperPayload): string;
+/**
+ * Trust fence for the destructive POST endpoints. These actions kill the DSH
+ * process, so a malicious webpage must not trigger them cross-origin (a
+ * `fetch(..., { mode: 'no-cors' })` still sends the request even though the
+ * response is unreadable).
+ *
+ * Defense in depth — mirrors the official DSH browser-trust fence
+ * (`isTrustedApiRequest` in dsh-client-connection) without importing the
+ * client package:
+ *   1. Loopback socket check — the request must arrive on 127.0.0.1/::1.
+ *   2. Host-header fence (DNS-rebinding defense): Host must be loopback or a
+ *      bare 127.0.0.1 authority — a rebound page carries the attacker's
+ *      domain in Host even though the socket lands here.
+ *   3. Cross-site fence: an explicit `sec-fetch-site: cross-site` is refused.
+ *   4. Origin fence: when a browser attaches Origin it must equal Host
+ *      (normalized); absent Origin is fine (curl/non-browser — Host already
+ *      bound the request).
+ *
+ * NOTE: our `/api/dsh-power-button/*` prefix is LONGER than the official
+ * `/api` route, so webServer's longest-prefix-wins matching means these
+ * requests never pass through the official fence automatically — this guard
+ * is the only line of defense for them.
+ *
+ * Exported for the security regression suite: this fence is self-maintained
+ * (a deliberate copy of the official browser-trust fence, adapted to this
+ * route), so a matrix test is what keeps it from silently drifting when the
+ * upstream fence evolves.
+ */
+declare function isTrustedPowerRequest(req: {
+  socket?: {
+    remoteAddress?: string | undefined;
+  } | undefined;
+  headers: Record<string, unknown>;
+}): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, RestartHelperPayload, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, inject, markerPath, name, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, RestartHelperPayload, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, inject, isTrustedPowerRequest, markerPath, name, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };

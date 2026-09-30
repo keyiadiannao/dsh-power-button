@@ -928,8 +928,16 @@ function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefin
  * `/api` route, so webServer's longest-prefix-wins matching means these
  * requests never pass through the official fence automatically — this guard
  * is the only line of defense for them.
+ *
+ * Exported for the security regression suite: this fence is self-maintained
+ * (a deliberate copy of the official browser-trust fence, adapted to this
+ * route), so a matrix test is what keeps it from silently drifting when the
+ * upstream fence evolves.
  */
-function isTrustedPowerRequest(req: import('node:http').IncomingMessage): boolean {
+export function isTrustedPowerRequest(req: {
+  socket?: { remoteAddress?: string | undefined } | undefined
+  headers: Record<string, unknown>
+}): boolean {
   const address = req.socket?.remoteAddress
   if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
   const { host, origin, 'sec-fetch-site': secFetchSite } = req.headers
