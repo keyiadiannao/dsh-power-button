@@ -56,6 +56,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 |---|---|---|
 | `enableModelTool` | `true` | 注册 `restart_harness` 模型工具。设 `false` 则重启仅保留在 GUI 按钮与 `/restart`。 |
 | `maxDelayMs` | `5000` | 模型工具 `delayMs` 参数的上限(ms)。有效下限为 1000 ms。 |
+| `restartWakeMode` | `quiet` | 重启后如何告知**发起它的那个会话**。`quiet` 只把通知暂存给它的下一个 step,不唤醒任何东西。`notify` 额外在该会话变成 live 后唤醒它,模型无需用户发消息即可报告重启结果。两种模式都不会自行再次重启。 |
 
 示例:
 

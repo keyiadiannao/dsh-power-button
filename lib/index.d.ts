@@ -20,7 +20,28 @@ interface Config {
   enableModelTool: boolean;
   /** Upper bound (ms) for the model tool's delayMs argument. */
   maxDelayMs: number;
+  /**
+   * What the session that asked for a restart is told afterwards.
+   *
+   * `quiet` persists a notice and injects it the next time that session is
+   * live, without waking anything. `notify` additionally wakes that session
+   * once it is live, so the model reports the restart without the user sending
+   * a message. Waking is the only difference; neither mode ever restarts again
+   * on its own.
+   */
+  restartWakeMode: 'quiet' | 'notify';
 }
+/**
+ * Message text for a restart notice, used by both wake modes.
+ *
+ * The closing constraint is not decoration: waking a session makes the model
+ * act without a user turn, so the notice has to bound that action to reporting
+ * the restart it is about.
+ */
+declare function restartNoticeText(restart: {
+  fromInstanceId: string;
+  restartId?: string;
+}): string;
 /** Schemastery schema; cordis validates and provides it as apply(ctx, config). */
 declare const Config: z<Config>;
 /** Per-port marker path. Exported for tests (isolated via DSH_HOME). */
@@ -65,14 +86,6 @@ declare function restartNoticeSummary(restart: {
   fromInstanceId: string;
 }): string;
 /**
- * Model-facing notice text: the facts this conversation cannot observe, and the
- * one thing it must not do about them.
- */
-declare function restartNoticeText(restart: {
-  fromInstanceId: string;
-  restartId?: string;
-}): string;
-/**
  * Persist one restart's notice, replacing any notice already queued for the
  * same session.
  *
@@ -81,12 +94,13 @@ declare function restartNoticeText(restart: {
  * session queues nothing: an origin-less restart must never be attributed to
  * whichever conversation happens to be open.
  * @param restart - the restart being reported.
+ * @param mode - whether the notice may wake the session once it is live.
  */
 declare function queueRestartNotice(restart: {
   fromInstanceId: string;
   restartId?: string;
   origin?: RestartOrigin;
-}): void;
+}, mode?: 'quiet' | 'notify'): void;
 /**
  * Deliver every queued notice whose session is live; keep the rest queued.
  *
@@ -94,6 +108,11 @@ declare function queueRestartNotice(restart: {
  * cannot replay it. A notice whose session is not live is never reassigned to a
  * different session and never wakes one — it simply waits. At most one notice
  * per session exists, so a reconnecting session receives at most one.
+ *
+ * A `notify` notice wakes its session with `followup` once it is live, which is
+ * the only difference from `quiet`: both carry the same text, and neither ever
+ * restarts again on its own. The session is woken at most once — the notice is
+ * deleted after a successful delivery, so a later boot finds nothing to replay.
  * @param ctx - host context carrying the agent registry.
  * @returns the number of notices delivered.
  */

@@ -10,7 +10,7 @@ import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
   APP_EXIT_WATCHDOG_MS, PRE_EXIT_FLUSH_CAP_MS, preExitBudgetMs, helperOldPidWaitMs, flushSessionsBounded,
-  queueRestartNotice, deliverPendingNotices, restartStatus,
+  queueRestartNotice, deliverPendingNotices, restartStatus, Config,
 } from '../src/index.ts'
 
 describe('requestAppExit', () => {
@@ -385,9 +385,14 @@ describe('restart awareness', () => {
   // delivered by a later one and make its count meaningless.
   beforeEach(() => { rmSync(noticeDir, { recursive: true, force: true }) })
 
-  const agentFor = (sessionId: string, injected: unknown[]) => ({
+  const agentFor = (sessionId: string, injected: unknown[], woken: unknown[] = []) => ({
     agents: {
-      get: (id: string) => (id === sessionId ? { inject: (m: unknown) => { injected.push(m) } } : undefined),
+      get: (id: string) => (id === sessionId
+        ? {
+          inject: (m: unknown) => { injected.push(m) },
+          followup: (m: unknown) => { woken.push(m) },
+        }
+        : undefined),
     },
   })
 
@@ -478,6 +483,68 @@ describe('restart awareness', () => {
     writeFileSync(join(noticeDir, 'r-nosummary.json'), JSON.stringify({ sessionId: 'session-7', text: 'x' }), 'utf8')
     expect(deliverPendingNotices(agentFor('session-7', []))).toBe(0)
     expect(existsSync(join(noticeDir, 'r-nosummary.json'))).toBe(false)
+  })
+
+  it('wakes the session exactly once in notify mode', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-wake', origin: { kind: 'model-tool', sessionId: 'session-7' },
+    }, 'notify')
+    const injected: unknown[] = []
+    const woken: unknown[] = []
+    const ctx = agentFor('session-7', injected, woken)
+
+    expect(deliverPendingNotices(ctx)).toBe(1)
+    expect(woken).toHaveLength(1)
+    // `followup` opens a turn; `inject` would only stage context. They must not
+    // both fire for one notice.
+    expect(injected).toHaveLength(0)
+
+    // At most once: a later boot finds nothing left to replay.
+    expect(deliverPendingNotices(ctx)).toBe(0)
+    expect(woken).toHaveLength(1)
+  })
+
+  it('leaves a notify notice queued until its session is live, then wakes it', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-later', origin: { kind: 'model-tool', sessionId: 'session-9' },
+    }, 'notify')
+    const injected: unknown[] = []
+    const woken: unknown[] = []
+
+    // Not live yet: nothing happens and the notice waits.
+    expect(deliverPendingNotices(agentFor('session-other', injected, woken))).toBe(0)
+    expect(woken).toHaveLength(0)
+    expect(existsSync(join(noticeDir, 'r-later.json'))).toBe(true)
+
+    // `session.follow` promotes the cold session into a live Agent, which is
+    // what makes it deliverable.
+    expect(deliverPendingNotices(agentFor('session-9', injected, woken))).toBe(1)
+    expect(woken).toHaveLength(1)
+    expect(injected).toHaveLength(0)
+  })
+
+  it('quiet mode stages context without waking, even when the session is live', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-quiet', origin: { kind: 'model-tool', sessionId: 'session-7' },
+    }, 'quiet')
+    const injected: unknown[] = []
+    const woken: unknown[] = []
+    expect(deliverPendingNotices(agentFor('session-7', injected, woken))).toBe(1)
+    expect(injected).toHaveLength(1)
+    expect(woken).toHaveLength(0)
+  })
+})
+
+describe('restartWakeMode config', () => {
+  // Waking a session without a user turn is the behaviour that needs consent,
+  // so the default is asserted rather than assumed.
+  it('defaults to quiet', () => {
+    expect(Config({} as never).restartWakeMode).toBe('quiet')
+  })
+
+  it('accepts notify and rejects anything else', () => {
+    expect(Config({ restartWakeMode: 'notify' } as never).restartWakeMode).toBe('notify')
+    expect(() => Config({ restartWakeMode: 'resume' } as never)).toThrow()
   })
 })
 

@@ -56,6 +56,7 @@ The plugin is configured through the profile's cordis layer (`cordis.patch.yml` 
 |---|---|---|
 | `enableModelTool` | `true` | Register the `restart_harness` model tool. Set `false` to keep restart exclusively on the GUI button and `/restart`. |
 | `maxDelayMs` | `5000` | Upper bound (ms) for the model tool's `delayMs` argument. The effective floor is 1000 ms. |
+| `restartWakeMode` | `quiet` | What the session that asked for a restart is told afterwards. `quiet` stages the notice for its next step without waking anything. `notify` additionally wakes that session once it is live, so the model reports the restart without the user sending a message. Neither mode ever restarts again on its own. |
 
 Example:
 
