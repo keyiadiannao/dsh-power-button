@@ -86,8 +86,15 @@ declare const APP_EXIT_WATCHDOG_MS = 15000;
  * @param watchdogMs - seam for tests; defaults to {@link APP_EXIT_WATCHDOG_MS}.
  */
 declare function requestAppExit(ctx: any, fallbackExit?: () => void, watchdogMs?: number): void;
-/** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
- * accumulate one file per restart forever. Best-effort, never throws. */
+/** Startup housekeeping: prune old restart-helper logs and handshake records so
+ * ~/.dsh does not accumulate one file per restart forever.
+ *
+ * The helper SCRIPT is pruned too, and deliberately: it embeds the full
+ * relaunch argv (which can carry an --api-key), and its self-delete only runs
+ * on a path the helper reaches itself. A helper that is killed instead of
+ * finishing — the Host kills a half-armed one when the handshake fails — never
+ * reaches cleanup(), so the argv-bearing file would otherwise stay forever.
+ * Best-effort, never throws. */
 declare function pruneOldRestartLogs(maxAgeDays?: number): void;
 /** Everything the generated helper needs; every path must be absolute.
  * Exported so the runtime acceptance tests can drive the EXACT shipped helper

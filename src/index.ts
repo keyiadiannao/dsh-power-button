@@ -320,19 +320,34 @@ export function requestAppExit(
   watchdog.unref?.()
 }
 
-/** Startup housekeeping: prune old restart-helper logs so ~/.dsh does not
- * accumulate one file per restart forever. Best-effort, never throws. */
+/** Startup housekeeping: prune old restart-helper logs and handshake records so
+ * ~/.dsh does not accumulate one file per restart forever.
+ *
+ * The helper SCRIPT is pruned too, and deliberately: it embeds the full
+ * relaunch argv (which can carry an --api-key), and its self-delete only runs
+ * on a path the helper reaches itself. A helper that is killed instead of
+ * finishing — the Host kills a half-armed one when the handshake fails — never
+ * reaches cleanup(), so the argv-bearing file would otherwise stay forever.
+ * Best-effort, never throws. */
 export function pruneOldRestartLogs(maxAgeDays = 7): void {
-  try {
-    const cutoff = Date.now() - maxAgeDays * 24 * 3600 * 1000
-    for (const name of fs.readdirSync(RUNTIME_DIR)) {
-      if (!name.startsWith('restart-helper-') || !name.endsWith('.log')) continue
-      const full = path.join(RUNTIME_DIR, name)
+  const cutoff = Date.now() - maxAgeDays * 24 * 3600 * 1000
+
+  const prune = (dir: string, claims: (name: string) => boolean): void => {
+    let names: string[]
+    try { names = fs.readdirSync(dir) } catch { return }
+    for (const name of names) {
+      if (!claims(name)) continue
+      const full = path.join(dir, name)
       try {
         if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full)
       } catch { /* ignore */ }
     }
-  } catch { /* ignore */ }
+  }
+
+  prune(RUNTIME_DIR, (name) =>
+    (name.startsWith('restart-helper-') && name.endsWith('.log'))
+    || (name.startsWith('dsh-restart-helper-') && name.endsWith('.cjs')))
+  prune(restartDir(), (name) => name.endsWith('.status.json') || name.endsWith('.commit.json'))
 }
 
 /** Boot breadcrumb with an ALLOWLIST of diagnostic fields only. The full
@@ -856,6 +871,10 @@ async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, acti
     if (helper !== undefined) {
       try { helper.kill() } catch { /* already exited; nothing left to stop */ }
     }
+    // A killed helper never reaches its own cleanup(), so remove the script
+    // here: it embeds the full relaunch argv. Best-effort — a helper still
+    // shutting down also unlinks it, and a missing file is the desired state.
+    try { fs.unlinkSync(HELPER_FILE) } catch { /* already gone, or still held */ }
     return { ok: false, action: 'restart', restartId, error: e instanceof Error ? e.message : String(e) }
   }
 }
