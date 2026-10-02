@@ -259,20 +259,25 @@ export function consumeRestartConfirmation(): { fromInstanceId: string, restartI
 }
 
 // ---------------------------------------------------------------------------
-// Restart awareness (non-waking)
+// Restart awareness
 // ---------------------------------------------------------------------------
 // A restarted harness knows something the conversation that asked for it does
-// not: the restart finished. `agent.inject()` queues model-facing context for
-// the next pre-step WITHOUT waking the driver — an idle agent leaves it pending
-// until a follow-up or steering wakes it — so the notice is already waiting the
-// next time that session runs, and the user never has to explain what happened.
+// not: the restart finished. The notice reaches that session through the Agent
+// API, in one of two modes:
 //
-// Nothing here wakes an agent, opens a turn, or appends a model-visible message
-// itself. Delivery goes through `Agent.inject()`, which durably stages an
-// `agent/inbox/spliced` record and lets the next legitimate step claim it. That
-// distinction is the point: this plugin never forges a turn, a user message, or
-// a crash tail — every model-visible channel that is not step-scoped would
-// require exactly that.
+//   quiet  — `agent.inject()` queues model-facing context for the next
+//            pre-step WITHOUT waking the driver. An idle agent leaves it
+//            pending until a follow-up or steering wakes it, so the notice is
+//            waiting the next time that session runs.
+//   notify — `agent.followup()` wakes the session once it is live, so the
+//            model reports the restart with no user message at all.
+//
+// Neither mode forges anything. `inject()` durably stages an `agent/inbox/
+// spliced` record and lets the next legitimate step claim it; `followup()` is
+// the documented wake path. What this plugin never does is append a
+// model-visible message itself, open a turn of its own, or write a crash tail —
+// every model-visible channel that is not step-scoped would require exactly
+// that.
 
 /** Directory of notices awaiting a live agent, at most one per session. */
 function noticeDir(): string {
@@ -344,15 +349,23 @@ export function queueRestartNotice(
 /**
  * Deliver every queued notice whose session is live; keep the rest queued.
  *
- * Idempotent by construction: a delivered notice is deleted, so a later boot
- * cannot replay it. A notice whose session is not live is never reassigned to a
- * different session and never wakes one — it simply waits. At most one notice
- * per session exists, so a reconnecting session receives at most one.
+ * Delivery is once per notice in normal operation: a delivered notice is
+ * deleted, so a later boot finds nothing to replay. Two durable states are
+ * involved and there is no transaction between them — the agent inbox and this
+ * notice file — so a host crash in the window after the inbox write and before
+ * the deletion delivers the notice a second time on the next boot. That is
+ * accepted rather than traded away: claiming the notice first would close the
+ * duplicate window by opening a lost-notice one, and losing the notice defeats
+ * its purpose. The notice text is written so that a repeat is harmless — it
+ * says the restart already happened and that nothing else should be resumed.
+ *
+ * A notice whose session is not live is never reassigned to a different session
+ * and never woken — it waits. At most one notice per session exists, so a
+ * reconnecting session receives at most one.
  *
  * A `notify` notice wakes its session with `followup` once it is live, which is
  * the only difference from `quiet`: both carry the same text, and neither ever
- * restarts again on its own. The session is woken at most once — the notice is
- * deleted after a successful delivery, so a later boot finds nothing to replay.
+ * restarts again on its own.
  * @param ctx - host context carrying the agent registry.
  * @returns the number of notices delivered.
  */
@@ -489,6 +502,42 @@ function resolvePort(ctx: any): number {
     if (Number.isFinite(n) && n > 0) return n
   }
   return 3080
+}
+
+/**
+ * Rewrite a relaunch argv so the successor binds the SAME port this process
+ * actually bound.
+ *
+ * `--port 0` means "let the OS choose", so replaying the original command line
+ * verbatim hands the successor a different port. The helper would then probe
+ * the port this process held until `health-timeout`, while the new instance sat
+ * healthy on another one; and because the restart marker is keyed by port, the
+ * successor would look for a marker file that does not exist and could never
+ * claim its restart identity. Restart means restart in place, so the resolved
+ * port is pinned into the command line.
+ *
+ * An argv with no `--port` is returned unchanged: that port comes from
+ * configuration, which the successor reads the same way, while adding a flag to
+ * a command line that did not have one risks introducing an option the app
+ * never accepted.
+ * @param argv - this process's arguments after the entry script.
+ * @param actualPort - the port this process is actually listening on.
+ * @returns a copy of `argv` with the port pinned, or `argv` unchanged.
+ */
+export function pinRelaunchPort(argv: readonly string[], actualPort: number): string[] {
+  const pinned = [...argv]
+  for (let i = 0; i < pinned.length; i++) {
+    const arg = pinned[i]
+    if (arg === '--port' && i + 1 < pinned.length) {
+      pinned[i + 1] = String(actualPort)
+      return pinned
+    }
+    if (arg?.startsWith('--port=')) {
+      pinned[i] = `--port=${String(actualPort)}`
+      return pinned
+    }
+  }
+  return pinned
 }
 
 function json(res: import('node:http').ServerResponse, status: number, payload: unknown): void {
@@ -1144,12 +1193,18 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     // Replay the CURRENT invocation, portably (no hard-coded paths):
     // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
     // script + app args. Spawned children inherit env, so any NODE_OPTIONS
-    // that launched us is preserved too.
-    const relaunch = JSON.stringify([process.execPath, ...process.execArgv, ...process.argv.slice(1)])
+    // that launched us is preserved too. The port is pinned to the one this
+    // process actually bound, so `--port 0` cannot hand the successor a
+    // different port than the helper is waiting on and the marker is keyed by.
+    const relaunchArgs = [
+      process.execPath,
+      ...process.execArgv,
+      ...pinRelaunchPort(process.argv.slice(1), port),
+    ]
     const cwd = process.cwd()
     const serverLog = path.join(RUNTIME_DIR, 'dsh-web.log')
     const helperScript = buildRestartHelper({
-      relaunch: [process.execPath, ...process.execArgv, ...process.argv.slice(1)],
+      relaunch: relaunchArgs,
       cwd,
       port,
       oldPid: process.pid,

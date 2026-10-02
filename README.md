@@ -87,7 +87,9 @@ click power → menu → Restart
           → wait for the port to free
           → wait for session logs to stop growing (quiescence)
           → write the v2 marker, then spawn DSH with the same execPath/argv/cwd
-            and a DSH_POWER_RESTART_ID launch token
+            and a DSH_POWER_RESTART_ID launch token. A `--port 0` command line
+            is rewritten to the port this process actually bound, so the
+            successor lands on the port the helper is waiting for
           → poll /health until ok && instanceId != old && restart.restartId matches
           → self-delete
 [client]  poll health → confirm new instanceId → auto reload
@@ -120,26 +122,36 @@ Three separate things, deliberately not one:
   restart identity on `/health` (`restart.fromInstanceId`, `restart.restartId`)
   for its whole lifetime; acknowledging the toast clears only the pending flag,
   never the identity.
-- **The session that asked** receives a restart notice. When the restart came
-  from `restart_harness` or `/restart`, the relaunched process queues a notice
-  for that exact session through `Agent.inject()`. Only a restart with a
-  recorded causal session gets one — a GUI click records none, and is never
-  attributed to whichever conversation happens to be open. At most one notice
-  per session is queued, and it is deleted once delivered.
+- **The session that asked** receives a restart notice, in one of the two
+  `restartWakeMode` shapes. `quiet` passes it to `Agent.inject()`, which stages
+  it for that session's next step without waking anything; `notify` uses
+  `Agent.followup()` so the session wakes — once it is live — and reports the
+  restart with no user message at all. Only a restart with a recorded causal
+  session gets a notice: a GUI click records none, and is never attributed to
+  whichever conversation happens to be open. At most one notice per session is
+  queued, and it is deleted once delivered.
 - **Every other session** can ask the `restart_status` tool, which reports the
   durable record: whether a restart happened, its id, stage, the instance it
   replaced and the one it produced, timings, who asked for it, and whether the
   running process is the instance that restart produced. This is how a model
   finds out about a restart it did not initiate.
 
-The plugin never appends a model-visible message itself, never forges a turn,
-and never wakes an agent. `Agent.inject()` durably stages an `agent/inbox/spliced`
-record and lets the next legitimate step claim it, which is why an idle
-conversation stays idle and simply knows what happened the next time it runs. An
-earlier design appended a synthetic `assistant/message` (`turn: 0, step: 0`) into
-the resumed conversation — that tripped the token-meter's step-pairing invariant
-and could corrupt large sessions, so it was removed. Tracked upstream:
+The plugin never appends a model-visible message itself and never forges a turn.
+It hands the notice to the Agent API — `inject()` durably stages an
+`agent/inbox/spliced` record for the next legitimate step to claim, and
+`followup()` is the documented wake path. An earlier design appended a synthetic
+`assistant/message` (`turn: 0, step: 0`) into the resumed conversation — that
+tripped the token-meter's step-pairing invariant and could corrupt large
+sessions, so it was removed. Tracked upstream:
 [deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802).
+
+Delivery is once per notice in normal operation. The notice file and the agent
+inbox are two durable states with no transaction between them, so a host crash
+in the window after the inbox write and before the deletion delivers the notice
+again on the next boot. That is accepted deliberately: claiming the notice
+first would trade a possible duplicate for a possible lost notice, and the
+notice text is written so a repeat is harmless — it says the restart already
+happened and that nothing else should be resumed.
 
 Mechanics:
 - The helper writes the restart marker **before** spawning the new process and
@@ -165,8 +177,9 @@ Mechanics:
 - The client checks `/health` once after load; when `restarted` is true it
   shows the toast, then ACKs via `POST /api/dsh-power-button/notice-shown`
   so a later refresh does not re-show it.
-- Because the confirmation never touches a session file, a restart can no
-  longer corrupt session logs or leave unpaired events behind.
+- The plugin never appends synthetic model-visible session events itself; restart
+  awareness is handed to the Agent API, so a restart still cannot corrupt session
+  logs or leave unpaired events behind.
 
 ## Development
 

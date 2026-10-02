@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import net from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { buildRestartHelper } from '../src/index.ts'
+import { buildRestartHelper, pinRelaunchPort } from '../src/index.ts'
 
 // The runtime acceptance suite: the helper script under test is the EXACT
 // output the host ships (buildRestartHelper), executed as a real detached
@@ -81,12 +81,38 @@ function killPid(pid: number | undefined): void {
   try { process.kill(pid) } catch { /* already gone */ }
 }
 
+/** The port a `--port 0` target was actually granted, once it reports it. */
+async function waitForBoundPort(file: string): Promise<number> {
+  const bound = await waitFor(async () => {
+    try {
+      const n = Number(readFileSync(file, 'utf8').trim())
+      return Number.isInteger(n) && n > 0 ? n : null
+    } catch { return null }
+  }, 10_000)
+  if (bound === null) throw new Error('target never reported its bound port')
+  return bound
+}
+
 /** Shared rig: temp home, a live old-instance target, and a generated helper
  * whose every file lands in the temp dir (never the real ~/.dsh). */
-async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: number, readyWaitMs?: number, oldPidWaitMs?: number, relaunchExec?: string, forgetRestart?: boolean } = {}) {
+async function startRidge(opts: {
+  relaunchInstance?: string
+  commitWaitMs?: number
+  readyWaitMs?: number
+  oldPidWaitMs?: number
+  relaunchExec?: string
+  forgetRestart?: boolean
+  /** Play the `--port 0` case: the old target lets the OS choose its port, and
+   * the relaunch argv is built through the plugin's own port pin. */
+  dynamicPort?: boolean
+} = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-power-e2e-'))
-  const port = await freePort()
-  const old = spawn(process.execPath, [TARGET, '--port', String(port), '--instance-id', OLD], { stdio: 'ignore' })
+  const portFile = join(home, 'port.txt')
+  const requestedPort = opts.dynamicPort ? '0' : String(await freePort())
+  const oldArgs = [TARGET, '--port', requestedPort, '--instance-id', OLD]
+  if (opts.dynamicPort) oldArgs.push('--port-file', portFile)
+  const old = spawn(process.execPath, oldArgs, { stdio: 'ignore' })
+  const port = opts.dynamicPort ? await waitForBoundPort(portFile) : Number(requestedPort)
   const up = await waitFor(async () => {
     const h = await getHealth(port)
     return h?.instanceId === OLD ? h : null
@@ -99,7 +125,14 @@ async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: numb
   const helperFile = join(home, 'helper.cjs')
   const commitFile = join(home, 'commit.json')
   const relaunchExec = opts.relaunchExec ?? process.execPath
-  const relaunchArgs = [relaunchExec, TARGET, '--port', String(port), '--instance-id', opts.relaunchInstance ?? NEW]
+  const relaunchInstance = opts.relaunchInstance ?? NEW
+  // In the dynamic case the successor's arguments go through the same pin the
+  // plugin applies, so this exercises the real fix instead of restating it: a
+  // verbatim `--port 0` replay would land on a different port than the helper
+  // is waiting for.
+  const relaunchArgs = opts.dynamicPort
+    ? [relaunchExec, TARGET, ...pinRelaunchPort(['--port', '0', '--instance-id', relaunchInstance], port)]
+    : [relaunchExec, TARGET, '--port', String(port), '--instance-id', relaunchInstance]
   if (opts.forgetRestart) relaunchArgs.push('--forget-restart')
   writeFileSync(helperFile, buildRestartHelper({
     relaunch: relaunchArgs,
@@ -168,6 +201,37 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       // The port now answers from the NEW instance, carrying the restart
       // identity this launch token produced — the same field the helper's
       // ready gate required.
+      const health = await getHealth(rig.port)
+      expect(health?.instanceId).toBe(NEW)
+      expect(health?.restart?.restartId).toBe(rig.restartId)
+      newPid = done?.newPid as number
+    } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('relaunches a --port 0 instance onto the port it actually bound', { timeout: 60_000 }, async () => {
+    // The case the whole pin exists for: with `--port 0` the OS chooses, so a
+    // verbatim replay would give the successor a different port. The helper
+    // would then poll the old one until health-timeout while the new instance
+    // sat healthy elsewhere, and the per-port marker would never be claimed.
+    const rig = await startRidge({ dynamicPort: true })
+    let newPid: number | undefined
+    try {
+      // Sanity: the rig really is on an OS-assigned port, not a chosen one.
+      expect(rig.port).toBeGreaterThan(1_024)
+
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 45_000)
+      expect(done?.stage).toBe('ready')
+
+      // The successor is reachable on the SAME port the helper waited for — the
+      // property a verbatim `--port 0` replay would break.
       const health = await getHealth(rig.port)
       expect(health?.instanceId).toBe(NEW)
       expect(health?.restart?.restartId).toBe(rig.restartId)

@@ -104,15 +104,23 @@ declare function queueRestartNotice(restart: {
 /**
  * Deliver every queued notice whose session is live; keep the rest queued.
  *
- * Idempotent by construction: a delivered notice is deleted, so a later boot
- * cannot replay it. A notice whose session is not live is never reassigned to a
- * different session and never wakes one — it simply waits. At most one notice
- * per session exists, so a reconnecting session receives at most one.
+ * Delivery is once per notice in normal operation: a delivered notice is
+ * deleted, so a later boot finds nothing to replay. Two durable states are
+ * involved and there is no transaction between them — the agent inbox and this
+ * notice file — so a host crash in the window after the inbox write and before
+ * the deletion delivers the notice a second time on the next boot. That is
+ * accepted rather than traded away: claiming the notice first would close the
+ * duplicate window by opening a lost-notice one, and losing the notice defeats
+ * its purpose. The notice text is written so that a repeat is harmless — it
+ * says the restart already happened and that nothing else should be resumed.
+ *
+ * A notice whose session is not live is never reassigned to a different session
+ * and never woken — it waits. At most one notice per session exists, so a
+ * reconnecting session receives at most one.
  *
  * A `notify` notice wakes its session with `followup` once it is live, which is
  * the only difference from `quiet`: both carry the same text, and neither ever
- * restarts again on its own. The session is woken at most once — the notice is
- * deleted after a successful delivery, so a later boot finds nothing to replay.
+ * restarts again on its own.
  * @param ctx - host context carrying the agent registry.
  * @returns the number of notices delivered.
  */
@@ -129,6 +137,27 @@ declare function deliverPendingNotices(ctx: any): number;
  * @returns the record, or `{ found: false }` when no restart has happened.
  */
 declare function restartStatus(ctx: any): Record<string, unknown>;
+/**
+ * Rewrite a relaunch argv so the successor binds the SAME port this process
+ * actually bound.
+ *
+ * `--port 0` means "let the OS choose", so replaying the original command line
+ * verbatim hands the successor a different port. The helper would then probe
+ * the port this process held until `health-timeout`, while the new instance sat
+ * healthy on another one; and because the restart marker is keyed by port, the
+ * successor would look for a marker file that does not exist and could never
+ * claim its restart identity. Restart means restart in place, so the resolved
+ * port is pinned into the command line.
+ *
+ * An argv with no `--port` is returned unchanged: that port comes from
+ * configuration, which the successor reads the same way, while adding a flag to
+ * a command line that did not have one risks introducing an option the app
+ * never accepted.
+ * @param argv - this process's arguments after the entry script.
+ * @param actualPort - the port this process is actually listening on.
+ * @returns a copy of `argv` with the port pinned, or `argv` unchanged.
+ */
+declare function pinRelaunchPort(argv: readonly string[], actualPort: number): string[];
 /**
  * Redact credential-shaped content from a command line before logging.
  * Handles both shapes:
@@ -304,4 +333,4 @@ declare function isTrustedPowerRequest(req: {
 }): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, writeMarker };

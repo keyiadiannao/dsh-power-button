@@ -10,7 +10,7 @@ import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
   APP_EXIT_WATCHDOG_MS, PRE_EXIT_FLUSH_CAP_MS, preExitBudgetMs, helperOldPidWaitMs, flushSessionsBounded,
-  queueRestartNotice, deliverPendingNotices, restartStatus, Config,
+  queueRestartNotice, deliverPendingNotices, restartStatus, Config, pinRelaunchPort,
 } from '../src/index.ts'
 
 describe('requestAppExit', () => {
@@ -499,7 +499,9 @@ describe('restart awareness', () => {
     // both fire for one notice.
     expect(injected).toHaveLength(0)
 
-    // At most once: a later boot finds nothing left to replay.
+    // Once per notice in normal operation: a later boot finds nothing to replay.
+    // (A crash between the inbox write and this deletion would deliver it again;
+    // the notice text is written so that repeat is harmless.)
     expect(deliverPendingNotices(ctx)).toBe(0)
     expect(woken).toHaveLength(1)
   })
@@ -545,6 +547,37 @@ describe('restartWakeMode config', () => {
   it('accepts notify and rejects anything else', () => {
     expect(Config({ restartWakeMode: 'notify' } as never).restartWakeMode).toBe('notify')
     expect(() => Config({ restartWakeMode: 'resume' } as never)).toThrow()
+  })
+})
+
+describe('pinRelaunchPort', () => {
+  // `--port 0` asks the OS to choose, so a verbatim replay hands the successor
+  // a different port than the helper is waiting on and the marker is keyed by.
+  it('rewrites a --port 0 argument to the port actually bound', () => {
+    expect(pinRelaunchPort(['web', '--port', '0'], 43_721)).toEqual(['web', '--port', '43721'])
+  })
+
+  it('rewrites the --port= form as well', () => {
+    expect(pinRelaunchPort(['web', '--port=0', '--host', '127.0.0.1'], 43_721))
+      .toEqual(['web', '--port=43721', '--host', '127.0.0.1'])
+  })
+
+  it('leaves the rest of the command line alone', () => {
+    expect(pinRelaunchPort(['web', '--port', '0', '--profile', 'web'], 43_721))
+      .toEqual(['web', '--port', '43721', '--profile', 'web'])
+  })
+
+  it('does not invent a --port the command line never had', () => {
+    // That port comes from configuration, which the successor reads the same
+    // way; adding a flag risks introducing an option the app never accepted.
+    const argv = ['web', '--profile', 'web']
+    expect(pinRelaunchPort(argv, 43_721)).toEqual(argv)
+  })
+
+  it('does not mutate its input', () => {
+    const argv = ['web', '--port', '0']
+    pinRelaunchPort(argv, 43_721)
+    expect(argv).toEqual(['web', '--port', '0'])
   })
 })
 

@@ -86,7 +86,8 @@ ARM → COMMIT → ACK 握手：没有任何进程负责拉起是 UI 唯一无�
          → 等端口释放
          → 等会话日志停止增长(静止)
          → 写 v2 marker,然后用相同 execPath/argv/cwd 拉起 DSH
-           并带上 DSH_POWER_RESTART_ID 启动令牌
+           并带上 DSH_POWER_RESTART_ID 启动令牌。若原命令行是 `--port 0`,
+           会被改写成本进程实际绑定的端口,使新实例落在 helper 正在等待的端口上
          → 轮询 /health 直到 ok && instanceId != 旧 && restart.restartId 匹配
          → 自删
 [客户端] 轮询 health → 确认新 instanceId → 自动刷新
@@ -118,20 +119,27 @@ ARM → COMMIT → ACK 握手：没有任何进程负责拉起是 UI 唯一无�
 - **界面**弹出本地化的 `已重启` / `Restarted` toast。进程在整个生命周期内都
   通过 `/health` 的 `restart.fromInstanceId`、`restart.restartId` 暴露自己的
   重启身份;确认 toast 只清 pending 标志,不会抹掉身份。
-- **发起重启的那个会话**会收到一条重启通知。当重启来自 `restart_harness` 或
-  `/restart` 时,新进程会通过 `Agent.inject()` 给那个确切的会话排队一条通知。
-  只有记录了 causal session 的重启才会排;GUI 点击不记录任何会话,也就**不会**
-  被归到恰好打开着的那个会话上。每个会话最多排队一条,投递后即删除。
+- **发起重启的那个会话**会收到一条重启通知,形态由 `restartWakeMode` 决定。
+  `quiet` 通过 `Agent.inject()` 把它暂存给该会话的下一个 step,不唤醒任何东西;
+  `notify` 用 `Agent.followup()`,在该会话变成 live 后唤醒它,模型无需用户发消息
+  即可报告重启结果。只有记录了 causal session 的重启才会发;GUI 点击不记录任何
+  会话,也就**不会**被归到恰好打开着的那个会话上。每个会话最多排队一条,投递后即删除。
 - **其他会话**可以调用 `restart_status` 工具,它报告那份持久记录:是否发生过
   重启、restartId、阶段、被替换的实例与新实例、各阶段时间、发起者,以及当前
   运行的进程是否就是这次重启产生的实例。模型正是靠它发现自己**没有**发起的重启。
 
-本插件**从不自己追加模型可见的消息、不伪造 turn、也不唤醒 agent**。
-`Agent.inject()` 会持久登记一条 `agent/inbox/spliced` 记录,交给下一个合法的
-step 去认领——这就是为什么空闲会话保持空闲,只是下次运行时已然知情。此前的
-设计会向恢复的会话追加合成的 `assistant/message`(`turn: 0, step: 0`)——该方案
-会触发 token-meter 的 step 配对不变量并可能损坏大会话,已移除。上游跟踪:
+本插件**从不自己追加模型可见的消息、不伪造 turn**。它把通知交给 Agent API:
+`inject()` 会持久登记一条 `agent/inbox/spliced` 记录,交给下一个合法的 step 去
+认领;`followup()` 是官方的唤醒路径。此前的设计会向恢复的会话追加合成的
+`assistant/message`(`turn: 0, step: 0`)——该方案会触发 token-meter 的 step 配对
+不变量并可能损坏大会话,已移除。上游跟踪:
 [deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802)。
+
+正常运行时每条通知只投递一次。通知文件与 agent inbox 是两个**没有事务关联**的
+持久状态,因此若宿主在"inbox 已写入、通知文件尚未删除"这个窗口内崩溃,下次启动会
+再投递一次。这是刻意接受的:若改成先认领再投递,就是拿"可能重复"换"可能丢失",
+而丢通知会直接废掉这个功能。通知文案本身也是按幂等写的——它说明重启已经发生、
+不要再恢复其他有副作用的操作。
 
 机制:
 - 启动时若消费到重启 marker,`/health` 会报告 `restarted: true, fromInstanceId: <old>`
