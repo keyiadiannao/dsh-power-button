@@ -339,6 +339,58 @@ export function deliverPendingNotices(ctx: any): number {
   return delivered
 }
 
+// ---------------------------------------------------------------------------
+// Restart diagnostics
+// ---------------------------------------------------------------------------
+
+/** Whether the newest restart record describes THIS process. */
+function recordDescribesThisBoot(record: Record<string, unknown>): boolean {
+  if (bootRestart === null) return false
+  // A record without a restartId comes from a marker generation that predates
+  // them, so the instance it replaced is the only field both sides share.
+  if (typeof record.restartId !== 'string' || typeof bootRestart.restartId !== 'string') {
+    return record.fromInstanceId === bootRestart.fromInstanceId
+  }
+  return record.restartId === bootRestart.restartId
+}
+
+/**
+ * Read-only view of the most recent restart: the durable record the helper
+ * wrote, plus whether this process is the instance that restart produced.
+ *
+ * This is the authoritative half of restart awareness. A notice reaches the
+ * session that asked; this answers the question for anyone else — including a
+ * restart started from the GUI or the command bar, which has no session to
+ * notify and would otherwise be invisible to a model.
+ * @param ctx - host context, used to resolve the port the record is keyed by.
+ * @returns the record, or `{ found: false }` when no restart has happened.
+ */
+export function restartStatus(ctx: any): Record<string, unknown> {
+  const record = readJsonFile(lastRestartPath(resolvePort(ctx)))
+  if (record === null && bootRestart === null) return { found: false }
+  const requestedAt = record?.requestedAt
+  const readyAt = record?.readyAt
+  const elapsedMs = typeof requestedAt === 'string' && typeof readyAt === 'string'
+    ? Date.parse(readyAt) - Date.parse(requestedAt)
+    : undefined
+  return {
+    found: true,
+    // True only when this running process is the one that restart produced.
+    isCurrentBoot: record === null ? bootRestart !== null : recordDescribesThisBoot(record),
+    thisInstanceId: INSTANCE_ID,
+    restartId: record?.restartId ?? bootRestart?.restartId,
+    stage: record?.stage,
+    fromInstanceId: record?.fromInstanceId ?? bootRestart?.fromInstanceId,
+    toInstanceId: record?.toInstanceId,
+    requestedAt,
+    readyAt,
+    ...(elapsedMs !== undefined && Number.isFinite(elapsedMs) ? { elapsedMs } : {}),
+    origin: record?.origin ?? bootRestart?.origin,
+    sessionQuiescent: record?.sessionQuiescent,
+    failure: record?.failure,
+  }
+}
+
 /**
  * Resolve the port the current web server listens on. Prefer the actual
  * `--port` argument (the CLI accepts `--port 0` for an OS-assigned port, in
@@ -1415,6 +1467,29 @@ export function apply(ctx: any, config: Config) {
       }
     }
   }
+
+  // Read-only restart diagnostics. Registered regardless of `enableModelTool`:
+  // that flag gates the destructive capability, while this is how a model finds
+  // out about a restart it did NOT initiate — a GUI click or /restart command
+  // has no causal session to notify, so nothing else would tell it.
+  ctx.effect(() => ctx.tools.register({
+    name: 'restart_status',
+    description: isEnglishLocale(ctx)
+      ? 'Report the most recent DeepSeek Harness restart: whether one happened, its id, stage, the instance it replaced and the one it produced, '
+        + 'timings, who asked for it, and whether THIS process is the instance that restart produced. Read-only; never restarts anything.'
+      : '报告最近一次 DeepSeek Harness 重启：是否发生过、restartId、阶段、被替换的实例与新实例、各阶段时间、发起者，'
+        + '以及当前进程是否就是这次重启产生的实例。只读，不会触发任何重启。',
+    parameters: { type: 'object', properties: {} },
+    output: {
+      schema: {},
+      render(_args: unknown, value: unknown) {
+        return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
+      },
+    },
+    async execute() {
+      return restartStatus(ctx)
+    },
+  }), 'dsh-power-button: restart_status tool')
 
   // Command-bar entries, self-contained (no anweat/dsh-restart needed):
   // `/restart` and `/shutdown` share the same at-most-once latch as the UI

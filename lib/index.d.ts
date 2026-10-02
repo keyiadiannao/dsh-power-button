@@ -97,6 +97,18 @@ declare function queueRestartNotice(restart: {
  */
 declare function deliverPendingNotices(ctx: any): number;
 /**
+ * Read-only view of the most recent restart: the durable record the helper
+ * wrote, plus whether this process is the instance that restart produced.
+ *
+ * This is the authoritative half of restart awareness. A notice reaches the
+ * session that asked; this answers the question for anyone else — including a
+ * restart started from the GUI or the command bar, which has no session to
+ * notify and would otherwise be invisible to a model.
+ * @param ctx - host context, used to resolve the port the record is keyed by.
+ * @returns the record, or `{ found: false }` when no restart has happened.
+ */
+declare function restartStatus(ctx: any): Record<string, unknown>;
+/**
  * Redact credential-shaped content from a command line before logging.
  * Handles both shapes:
  *   --api-key=sk-xxx          (inline key=value → value redacted)
@@ -268,4 +280,4 @@ declare function isTrustedPowerRequest(req: {
 }): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, writeMarker };

@@ -10,7 +10,7 @@ import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
   APP_EXIT_WATCHDOG_MS, PRE_EXIT_FLUSH_CAP_MS, preExitBudgetMs, helperOldPidWaitMs, flushSessionsBounded,
-  queueRestartNotice, deliverPendingNotices,
+  queueRestartNotice, deliverPendingNotices, restartStatus,
 } from '../src/index.ts'
 
 describe('requestAppExit', () => {
@@ -429,5 +429,62 @@ describe('restart awareness', () => {
     const rejecting = { agents: { get: () => ({ inject: () => { throw new Error('disposed') } }) } }
     expect(deliverPendingNotices(rejecting)).toBe(0)
     expect(existsSync(join(noticeDir, 'r-3.json'))).toBe(true)
+  })
+})
+
+describe('restartStatus', () => {
+  const recordFile = (port: number): string => join(testHome, `dsh-power-restart-last-${port}.json`)
+  const ctxForPort = (port: number) => ({ webServer: { server: { address: () => ({ port }) } } })
+
+  it('reports nothing when no restart has been recorded', () => {
+    expect(restartStatus(ctxForPort(31_997))).toEqual({ found: false })
+  })
+
+  it('reports the last restart: stage, timings, origin and whether this is its instance', () => {
+    const port = 31_996
+    writeFileSync(recordFile(port), JSON.stringify({
+      schemaVersion: 2,
+      restartId: 'r-1',
+      port,
+      oldPid: 1,
+      fromInstanceId: 'instance-A',
+      requestedAt: '2026-10-02T00:00:00.000Z',
+      stage: 'ready',
+      newPid: 2,
+      toInstanceId: 'instance-B',
+      readyAt: '2026-10-02T00:00:04.000Z',
+      origin: { kind: 'model-tool', sessionId: 'session-7' },
+      sessionQuiescent: true,
+    }), 'utf8')
+
+    expect(restartStatus(ctxForPort(port))).toMatchObject({
+      found: true,
+      restartId: 'r-1',
+      stage: 'ready',
+      fromInstanceId: 'instance-A',
+      toInstanceId: 'instance-B',
+      elapsedMs: 4_000,
+      sessionQuiescent: true,
+      origin: { kind: 'model-tool', sessionId: 'session-7' },
+    })
+    // This process consumed no marker, so it is not the instance that restart
+    // produced — the field must not claim otherwise.
+    expect(restartStatus(ctxForPort(port)).isCurrentBoot).toBe(false)
+  })
+
+  it('surfaces a failed restart with its reason instead of hiding it', () => {
+    const port = 31_995
+    writeFileSync(recordFile(port), JSON.stringify({
+      schemaVersion: 2,
+      restartId: 'r-2',
+      fromInstanceId: 'instance-A',
+      stage: 'failed',
+      failure: { code: 'health-timeout', message: 'new process did not answer /health' },
+    }), 'utf8')
+    expect(restartStatus(ctxForPort(port))).toMatchObject({
+      found: true,
+      stage: 'failed',
+      failure: { code: 'health-timeout' },
+    })
   })
 })
