@@ -13,10 +13,10 @@
 
 - **侧边栏电源按钮**:注册到页脚操作位(`sidebar.footer.action`),主题自适应,外观与旁边的"设置"按钮一致
 - **重启/关机菜单** + Windows 关机风格全屏过渡动画;重启确认后页面自动刷新
-- **自包含重启引擎**:写一个 detached 的 `.cjs` helper,等旧进程退出、端口释放后,用相同的 `execPath/execArgv/argv/cwd` 重新拉起 DSH。不使用 PowerShell、不使用 `taskkill`
-- **`/restart` 与 `/shutdown` 命令**,以及 **`restart_harness` 模型工具**(与 `anweat/dsh-restart` 同名;若名字已被其它插件占用则跳过注册)
+- **自包含重启引擎**:写一个 detached 的 `.cjs` helper,经 ARM → COMMIT → ACK 握手接手拉起职责,等旧进程退出、端口释放、会话日志停止增长后,用相同的 `execPath/execArgv/argv/cwd` 重新拉起 DSH,并以 `restartId` 确认新实例。不使用 PowerShell、不使用 `taskkill`
+- **`/restart` 与 `/shutdown` 命令**、**`restart_harness` 模型工具**(与 `anweat/dsh-restart` 同名;若名字已被其它插件占用则跳过注册),以及只读的 **`restart_status`** 诊断工具
 - **界面与宿主文案本地化**(中文 / English),跟随 profile 的 `locale.preference`
-- **启动清理**:自动清理运行目录下超过 7 天的 `restart-helper-*.log`
+- **启动清理**:自动清理运行目录下超过 7 天的 helper 日志与脚本、每次重启的握手记录,以及尚未投递的重启通知
 
 ## 截图
 
@@ -67,17 +67,31 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 
 ## 工作原理
 
+旧进程在有一个存活的继任者接手拉起职责之前，不得退出。这是一次显式的
+ARM → COMMIT → ACK 握手：没有任何进程负责拉起是 UI 唯一无法挽回的结果，
+因此 ACK 之前的任何失败都会让旧进程继续运行。
+
 ```
 点击电源 → 菜单 → 重启
 [宿主]   POST /api/dsh-power-button/restart
-         → 写 ~/.dsh/restart-helper-<pid>-<ts>.cjs
+         → 写出本次重启专用的 helper .cjs(0600:其中内嵌拉起 argv)
          → spawn `node <helper>` (detached, windowsHide)
-[助手]   等旧 PID 退出 → 等端口释放 → 用相同 execPath/argv/cwd 重新拉起 DSH → 自删
-[宿主]   响应刷出后终止
+[助手]   ARM   → status { stage: 'armed', armedAt }
+[宿主]   等到 ARMED(5 秒)→ 写入本次 restartId 的 COMMIT 文件
+[助手]   ACK   → status { stage: 'committed', committedAt }
+[宿主]   此时才:unref helper → flush 所有活跃会话(上限 5 秒)
+         → 在 delayMs 后请求退出,其后有 15 秒看门狗
+[助手]   等旧 PID 退出(以宿主自身的退出预算为上限)
+         → 等端口释放
+         → 等会话日志停止增长(静止)
+         → 写 v2 marker,然后用相同 execPath/argv/cwd 拉起 DSH
+           并带上 DSH_POWER_RESTART_ID 启动令牌
+         → 轮询 /health 直到 ok && instanceId != 旧 && restart.restartId 匹配
+         → 自删
 [客户端] 轮询 health → 确认新 instanceId → 自动刷新
 ```
 
-关机则 POST `/api/dsh-power-button/shutdown`,终止且不拉起。由于关机不可逆(进程停止后需手动启动),GUI 在关机前会**弹确认对话框**,需要再次点击确认才执行。(`/shutdown` 命令与模型工具保持单次触发;模型不暴露关机。)
+关机则 POST `/api/dsh-power-button/shutdown`,终止且不拉起。由于关机不可逆(进程停止后需手动启动),**电源按钮和 `/shutdown` 命令都会先弹确认对话框**,需要再次点击确认才执行。模型不暴露关机。
 
 开发中踩过的坑:
 
@@ -86,7 +100,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 - 重启成功以**每次进程独立的 `instanceId` 变化**(旧→新)为准,短暂离线本身不算成功
 - **持久写静止检查**:旧进程退出、端口释放后,helper 轮询所有会话日志的 `(size, mtimeMs)` 直到连续两次采样一致(上限约 15 秒)才重启。旧进程主循环退出后其会话写缓冲可能仍在落盘;在仍在追加的文件上拉起新进程会插入旧 seq 造成会话损坏——此检查封堵了这个窗口
 - **启动器的退出请求要当服务读,不能当属性读**:它在 `ctx.get('appExit')`。`appExit` 是本插件未在 `inject` 中声明的可选宿主值,上下文代理会把 `ctx.appExit` 解析为 `undefined`——按属性读取会**在每次重启和关机时静默跳过优雅销毁**,直接走 `process.exit` 硬杀(丢失树销毁、存储 flush、端口释放)。官方读取方(`dsh-cmdline`、`dsh-headless`)同样走 `ctx.get`
-- **优雅退出有界**:请求 `appExit` 后,若进程仍存活,15 秒看门狗会硬退出。DSH 以自身 5 秒上限销毁树,但该上限只在**销毁仍在进行**时强杀——若销毁提前 resolve,进程就被交给事件循环自行结束,而此时只要有一个残留句柄(后台任务、MCP 子进程、插件自有监听),循环就会活过 helper 的 30 秒耐心,helper 随即放弃且**不再拉起新进程**,用户就落得没有服务。看门狗保证重启始终落在 helper 耐心之内
+- **优雅退出与退出前 flush 都有界**:请求 `appExit` 后,若进程仍存活,15 秒看门狗会硬退出;其前的会话 flush 上限为 5 秒。helper 等旧 PID 的耐心**由该预算推导**(flush 上限 + delayMs + 看门狗,再加余量),而不是写成第二个常量。此前 flush 无上限,夹在 helper 的 COMMIT 与进程退出之间,而 helper 只固定等 30 秒——flush 超过约 13.5 秒就足以让 helper 放弃且**不再拉起新进程**,用户落得没有服务。把两者绑成推导关系,正是防止它们日后各自漂移
 
 ## 安全
 
@@ -96,20 +110,34 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 - 重启 marker 在启动时**消费即删除**,后续普通启动不会误报"重启过"
 - 命令行日志**脱敏**(凭据不会进入 `~/.dsh/restart-helper-<pid>.log`);helper 与 marker 文件以 `0600` 写入,运行目录 `0700`
 
-## 重启确认——纯 UI 提示,绝不写入会话
+## 重启后,会话能知道什么
 
-重启成功后,插件会在界面角落弹出一条本地化的 `已重启` / `Restarted`
-toast。这是**纯 UI 提示**:不会向任何会话日志写入内容。(此前的设计会向
-恢复的会话追加合成的 `assistant/message`(`turn: 0, step: 0`)——该方案会
-触发 token-meter 的 step 配对不变量并可能损坏大会话,已移除。上游跟踪:
-[deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802)。)
+三件独立的事,刻意不合并成一件:
+
+- **界面**弹出本地化的 `已重启` / `Restarted` toast。进程在整个生命周期内都
+  通过 `/health` 的 `restart.fromInstanceId`、`restart.restartId` 暴露自己的
+  重启身份;确认 toast 只清 pending 标志,不会抹掉身份。
+- **发起重启的那个会话**会收到一条重启通知。当重启来自 `restart_harness` 或
+  `/restart` 时,新进程会通过 `Agent.inject()` 给那个确切的会话排队一条通知。
+  只有记录了 causal session 的重启才会排;GUI 点击不记录任何会话,也就**不会**
+  被归到恰好打开着的那个会话上。每个会话最多排队一条,投递后即删除。
+- **其他会话**可以调用 `restart_status` 工具,它报告那份持久记录:是否发生过
+  重启、restartId、阶段、被替换的实例与新实例、各阶段时间、发起者,以及当前
+  运行的进程是否就是这次重启产生的实例。模型正是靠它发现自己**没有**发起的重启。
+
+本插件**从不自己追加模型可见的消息、不伪造 turn、也不唤醒 agent**。
+`Agent.inject()` 会持久登记一条 `agent/inbox/spliced` 记录,交给下一个合法的
+step 去认领——这就是为什么空闲会话保持空闲,只是下次运行时已然知情。此前的
+设计会向恢复的会话追加合成的 `assistant/message`(`turn: 0, step: 0`)——该方案
+会触发 token-meter 的 step 配对不变量并可能损坏大会话,已移除。上游跟踪:
+[deepseek-ai/DeepSeek-Harness#802](https://github.com/deepseek-ai/deepseek-harness/discussions/802)。
 
 机制:
 - 启动时若消费到重启 marker,`/health` 会报告 `restarted: true, fromInstanceId: <old>`
 - `/health` 还会报告 `appExit: "available" | "missing"`——启动器提供的退出通道在当前宿主是否真的可解析。`missing` 意味着每次重启都退化为 `process.exit`(无优雅销毁);该字段把"重启卡 30 秒"变成一次请求即可确诊
 - 客户端加载后查询一次 `/health`;若 `restarted` 为真则显示 toast,然后通过
   `POST /api/dsh-power-button/notice-shown` 确认,避免刷新后重复弹出
-- 由于确认消息完全不触碰会话文件,重启**不再可能损坏会话日志**或留下未配对事件
+- 重启通知走 DSH 官方的 inbox 机制,不直接 append 会话事件,因此重启**不会**损坏会话日志或留下未配对事件
 
 ## 开发
 
