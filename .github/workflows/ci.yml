@@ -1,8 +1,9 @@
-# CI for dsh-power-button. The committed `lib/` artifacts are what git
-# installs run, so the pipeline enforces that they are byte-fresh: build must
-# produce zero diff against what is checked in. The runtime acceptance suite
-# spawns real processes on every OS — exactly the layer (detached processes,
-# pid liveness, port release) that unit tests cannot prove.
+# CI for dsh-power-button. The committed `lib/` artifacts are what git installs
+# run, so the pipeline enforces that they are byte-fresh: build must produce zero
+# diff against what is checked in. The runtime acceptance suite spawns real
+# processes on every OS — exactly the layer (detached processes, pid liveness,
+# port release) that unit tests and a single platform cannot prove, which is why
+# the matrix covers all three supported platforms.
 name: CI
 
 on:
@@ -15,15 +16,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       # Windows runners default to autocrlf, which would rewrite the checked-in
       # LF artifacts and make the lib-diff gate fail spuriously.
       - run: git config --global core.autocrlf false
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -37,3 +38,21 @@ jobs:
       - run: pnpm build
       - name: committed lib/ matches the build
         run: git diff --exit-code -- lib
+      # A git install ships exactly the `files` set, so a missing `lib/` entry
+      # produces a plugin that installs cleanly and then fails to load. `pnpm
+      # pack` is the packer this project pins; `npm pack --dry-run` is not a
+      # substitute for asserting on what that packer actually emits.
+      - name: the published file set is complete
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm pack > /dev/null
+          tarball=$(ls dsh-power-button-*.tgz)
+          entries=$(tar -tzf "$tarball")
+          rm -f "$tarball"
+          for entry in lib/index.js lib/index.d.ts lib/client.js cordis.patch.yml package.json; do
+            if ! grep -qx "package/$entry" <<< "$entries"; then
+              echo "missing from the tarball: $entry"
+              exit 1
+            fi
+          done
