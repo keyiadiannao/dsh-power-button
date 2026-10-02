@@ -30,7 +30,12 @@ function freePort(): Promise<number> {
   })
 }
 
-function getHealth(port: number): Promise<{ ok?: boolean, instanceId?: string } | null> {
+function getHealth(port: number): Promise<{
+  ok?: boolean
+  instanceId?: string
+  /** Restart identity, exposed for the process's whole lifetime (schema v2). */
+  restart?: { restartId?: string, fromInstanceId?: string }
+} | null> {
   return new Promise((resolve) => {
     const req = http.get({ host: '127.0.0.1', port, path: '/api/dsh-power-button/health', timeout: 1500 }, (res) => {
       let body = ''
@@ -78,7 +83,7 @@ function killPid(pid: number | undefined): void {
 
 /** Shared rig: temp home, a live old-instance target, and a generated helper
  * whose every file lands in the temp dir (never the real ~/.dsh). */
-async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: number, readyWaitMs?: number, relaunchExec?: string, forgetRestart?: boolean } = {}) {
+async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: number, readyWaitMs?: number, oldPidWaitMs?: number, relaunchExec?: string, forgetRestart?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-power-e2e-'))
   const port = await freePort()
   const old = spawn(process.execPath, [TARGET, '--port', String(port), '--instance-id', OLD], { stdio: 'ignore' })
@@ -112,6 +117,10 @@ async function startRidge(opts: { relaunchInstance?: string, commitWaitMs?: numb
     sessionsRoot: join(home, 'sessions'),
     commitWaitMs: opts.commitWaitMs ?? 15_000,
     readyWaitMs: opts.readyWaitMs ?? 30_000,
+    // The Host derives this from its own exit budget; the rig plays the Host,
+    // so it supplies a short bound that is still comfortably longer than the
+    // fake old process needs to die.
+    oldPidWaitMs: opts.oldPidWaitMs ?? 10_000,
     requestedAt: new Date().toISOString(),
   }), 'utf8')
 
@@ -161,7 +170,7 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       // ready gate required.
       const health = await getHealth(rig.port)
       expect(health?.instanceId).toBe(NEW)
-      expect((health?.restart as { restartId?: string } | undefined)?.restartId).toBe(rig.restartId)
+      expect(health?.restart?.restartId).toBe(rig.restartId)
       newPid = done?.newPid as number
     } finally {
       killPid(rig.old.pid)

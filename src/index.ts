@@ -396,8 +396,70 @@ const HELPER_READY_WAIT_MS = 60_000
 /** Schema version of the handshake status records (not the marker's). */
 const RESTART_SCHEMA_VERSION = 2
 
+/**
+ * Upper bound on the best-effort pre-exit session flush.
+ *
+ * The flush is a durability nicety — `ctx.appExit` disposal is the authority —
+ * but an unbounded one is a safety hole, not just a slow path. The session
+ * flush sits between the helper's COMMIT and this process's exit, and the
+ * helper only waits so long before abandoning a process it believes is stuck.
+ * A flush that never settles would therefore produce exactly the outcome the
+ * handshake exists to prevent: nobody left to relaunch.
+ */
+export const PRE_EXIT_FLUSH_CAP_MS = 5_000
+/**
+ * Extra margin the helper keeps beyond the Host's worst-case exit budget, so
+ * ordinary scheduling jitter cannot make it abandon a process that is still
+ * shutting down.
+ */
+const HELPER_OLD_PID_MARGIN_MS = 15_000
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => { setTimeout(resolve, ms) })
+}
+
+/**
+ * This process's worst-case time from the helper's COMMIT to actually exiting:
+ * the capped flush, the delay before the exit is requested, and the graceful
+ * `ctx.appExit` watchdog that falls back to a hard exit.
+ * @param delayMs - the delay this restart was asked to observe before exiting.
+ * @returns milliseconds; the helper's patience is derived from this.
+ */
+export function preExitBudgetMs(delayMs: number): number {
+  return PRE_EXIT_FLUSH_CAP_MS + Math.max(0, delayMs) + APP_EXIT_WATCHDOG_MS
+}
+
+/**
+ * How long the generated helper waits for this process to exit.
+ *
+ * Derived from {@link preExitBudgetMs} on purpose. A helper that gives up
+ * before this process finishes exiting abandons a restart that is still
+ * completing, and nothing is left to relaunch — the one outcome the handshake
+ * exists to prevent. Two independently-maintained constants would silently
+ * re-open that window the next time either side is tuned.
+ * @param delayMs - the delay this restart was asked to observe before exiting.
+ * @returns milliseconds, strictly greater than the Host's own budget.
+ */
+export function helperOldPidWaitMs(delayMs: number): number {
+  return preExitBudgetMs(delayMs) + HELPER_OLD_PID_MARGIN_MS
+}
+
+/**
+ * Flush every live session, bounded. Returning late is never worth blocking the
+ * exit on: the helper is already waiting, and a flush that never settles would
+ * strand the restart with no process left to relaunch it.
+ * @param ctx - host context carrying the session service.
+ * @param capMs - hard upper bound on the wait.
+ */
+export async function flushSessionsBounded(ctx: any, capMs: number): Promise<void> {
+  try {
+    const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
+    if (live.length === 0) return
+    const flushing = Promise.allSettled(live.map((session: unknown) => ctx.sessions.flush(session)))
+    await Promise.race([flushing, sleep(capMs)])
+  } catch {
+    // A throwing flush is not a reason to hold the exit either.
+  }
 }
 
 /** Directory holding per-restart handshake files. */
@@ -505,6 +567,14 @@ export interface RestartHelperPayload {
   sessionsRoot: string
   commitWaitMs: number
   readyWaitMs: number
+  /**
+   * How long the helper waits for this process to exit before it gives up.
+   * Derived by the Host from its own worst-case exit budget
+   * ({@link preExitBudgetMs}) rather than written as a second independent
+   * constant: if the helper's patience is ever the shorter of the two, it
+   * abandons a process that is still on its way out and nobody relaunches.
+   */
+  oldPidWaitMs: number
   requestedAt: string
 }
 
@@ -535,6 +605,7 @@ const SERVER_LOG = ${JSON.stringify(p.serverLog)};
 const SESSIONS_ROOT = ${JSON.stringify(p.sessionsRoot)};
 const COMMIT_WAIT_MS = ${p.commitWaitMs};
 const READY_WAIT_MS = ${p.readyWaitMs};
+const OLD_PID_WAIT_MS = ${p.oldPidWaitMs};
 const RELAUNCH_RETRIES = 3;
 const REQUESTED_AT = ${JSON.stringify(p.requestedAt)};
 function log(m) {
@@ -697,11 +768,15 @@ function sessionsQuiescent(maxWaitMs) {
     log('handoff committed by host, waiting for old pid to exit');
     patchStatus({ stage: 'waiting-old-exit' });
     let gone = false;
-    for (let i = 0; i < 60; i++) {
+    // Bounded by the Host's own exit budget, not by a fixed count: giving up
+    // while the old process is still shutting down would leave nobody to
+    // relaunch it, which is the one failure the UI cannot recover from.
+    const oldPidDeadline = Date.now() + OLD_PID_WAIT_MS;
+    while (Date.now() < oldPidDeadline) {
       if (pidGone(OLD_PID)) { gone = true; break; }
       await sleep(500);
     }
-    if (!gone) { fail('old-process-still-alive', 'old process never exited'); return; }
+    if (!gone) { fail('old-process-still-alive', 'old process did not exit within ' + OLD_PID_WAIT_MS + 'ms'); return; }
     patchStatus({ stage: 'waiting-port', oldExitedAt: new Date().toISOString() });
     log('old pid gone, waiting for port ' + PORT + ' to free');
     let freed = false;
@@ -803,6 +878,10 @@ async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, acti
       sessionsRoot: path.join(RUNTIME_DIR, 'sessions'),
       commitWaitMs: HELPER_COMMIT_WAIT_MS,
       readyWaitMs: HELPER_READY_WAIT_MS,
+      // Derived, never a second constant: the helper must outwait this
+      // process's worst-case exit, or it abandons a restart that is still
+      // completing and nothing relaunches.
+      oldPidWaitMs: helperOldPidWaitMs(delayMs),
       requestedAt: new Date().toISOString(),
     })
     fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
@@ -851,18 +930,10 @@ async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, acti
         requestAppExit(ctx)
       }, delayMs)
     }
-    try {
-      const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
-      if (live.length === 0) {
-        scheduleExit()
-      } else {
-        Promise.allSettled(live.map((session: unknown) => ctx.sessions.flush(session)))
-          .then(scheduleExit)
-          .catch(scheduleExit)
-      }
-    } catch {
-      scheduleExit()
-    }
+    // Fire-and-forget: the tool result must not wait on the flush, and the
+    // helper is already waiting for this process to exit. The cap is what keeps
+    // a stuck flush from outliving the helper's patience.
+    void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then(scheduleExit)
     return { ok: true, action: 'restart', restartId, note: isEnglishLocale(ctx) ? 'DeepSeek Harness is restarting' : 'DeepSeek Harness 正在重启' }
   } catch (e) {
     // Nothing before the handshake completed may end this process: an exit
@@ -896,20 +967,11 @@ function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefin
       requestAppExit(ctx)
     }
     // Flush every live session before exiting so the write-behind buffer is
-    // durably on disk — same durability barrier as the restart path.
+    // durably on disk — same durability barrier as the restart path, and
+    // bounded for the same reason: a flush that never settles would leave the
+    // process alive after the user asked it to stop.
     const exitSoon = (): void => {
-      try {
-        const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
-        if (live.length === 0) {
-          exitNow()
-          return
-        }
-        Promise.allSettled(live.map((session: unknown) => ctx.sessions.flush(session)))
-          .then(exitNow)
-          .catch(exitNow)
-      } catch {
-        exitNow()
-      }
+      void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then(exitNow)
     }
     if (res !== undefined && typeof res.once === 'function') {
       // HTTP path: exit on THIS response's 'finish' so the client sees the

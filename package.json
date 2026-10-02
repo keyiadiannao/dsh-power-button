@@ -1,6 +1,6 @@
 {
   "name": "dsh-power-button",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Self-contained power control for DSH: sidebar power button with an upward 重启/关机 menu plus a Windows-shutdown-style overlay. Own restart & shutdown engine (no dependency on other plugins), MIT licensed.",
   "type": "module",
   "main": "./lib/index.js",
@@ -35,8 +35,9 @@
   "scripts": {
     "build": "tsdown -c tsdown.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "typecheck:tests": "tsc -p tsconfig.test.json --pretty false",
     "test": "vitest run",
-    "check": "pnpm typecheck && pnpm test && pnpm build"
+    "check": "pnpm typecheck && pnpm typecheck:tests && pnpm test && pnpm build"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

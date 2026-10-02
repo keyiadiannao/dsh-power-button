@@ -29,6 +29,10 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm typecheck
+      # The root tsconfig excludes tests/ and vitest only transpiles them, so a
+      # required field can change under the runtime suite and surface as a
+      # failing assertion instead of a compile error.
+      - run: pnpm typecheck:tests
       - run: pnpm test
       - run: pnpm build
       - name: committed lib/ matches the build

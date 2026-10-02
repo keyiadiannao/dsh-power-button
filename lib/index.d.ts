@@ -96,6 +96,45 @@ declare function requestAppExit(ctx: any, fallbackExit?: () => void, watchdogMs?
  * reaches cleanup(), so the argv-bearing file would otherwise stay forever.
  * Best-effort, never throws. */
 declare function pruneOldRestartLogs(maxAgeDays?: number): void;
+/**
+ * Upper bound on the best-effort pre-exit session flush.
+ *
+ * The flush is a durability nicety — `ctx.appExit` disposal is the authority —
+ * but an unbounded one is a safety hole, not just a slow path. The session
+ * flush sits between the helper's COMMIT and this process's exit, and the
+ * helper only waits so long before abandoning a process it believes is stuck.
+ * A flush that never settles would therefore produce exactly the outcome the
+ * handshake exists to prevent: nobody left to relaunch.
+ */
+declare const PRE_EXIT_FLUSH_CAP_MS = 5000;
+/**
+ * This process's worst-case time from the helper's COMMIT to actually exiting:
+ * the capped flush, the delay before the exit is requested, and the graceful
+ * `ctx.appExit` watchdog that falls back to a hard exit.
+ * @param delayMs - the delay this restart was asked to observe before exiting.
+ * @returns milliseconds; the helper's patience is derived from this.
+ */
+declare function preExitBudgetMs(delayMs: number): number;
+/**
+ * How long the generated helper waits for this process to exit.
+ *
+ * Derived from {@link preExitBudgetMs} on purpose. A helper that gives up
+ * before this process finishes exiting abandons a restart that is still
+ * completing, and nothing is left to relaunch — the one outcome the handshake
+ * exists to prevent. Two independently-maintained constants would silently
+ * re-open that window the next time either side is tuned.
+ * @param delayMs - the delay this restart was asked to observe before exiting.
+ * @returns milliseconds, strictly greater than the Host's own budget.
+ */
+declare function helperOldPidWaitMs(delayMs: number): number;
+/**
+ * Flush every live session, bounded. Returning late is never worth blocking the
+ * exit on: the helper is already waiting, and a flush that never settles would
+ * strand the restart with no process left to relaunch it.
+ * @param ctx - host context carrying the session service.
+ * @param capMs - hard upper bound on the wait.
+ */
+declare function flushSessionsBounded(ctx: any, capMs: number): Promise<void>;
 /** Everything the generated helper needs; every path must be absolute.
  * Exported so the runtime acceptance tests can drive the EXACT shipped helper
  * script against fake target processes instead of a real DSH instance. */
@@ -115,6 +154,14 @@ interface RestartHelperPayload {
   sessionsRoot: string;
   commitWaitMs: number;
   readyWaitMs: number;
+  /**
+   * How long the helper waits for this process to exit before it gives up.
+   * Derived by the Host from its own worst-case exit budget
+   * ({@link preExitBudgetMs}) rather than written as a second independent
+   * constant: if the helper's patience is ever the shorter of the two, it
+   * abandons a process that is still on its way out and nobody relaunches.
+   */
+  oldPidWaitMs: number;
   requestedAt: string;
 }
 /**
@@ -159,4 +206,4 @@ declare function isTrustedPowerRequest(req: {
 }): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, RestartHelperPayload, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, inject, isTrustedPowerRequest, markerPath, name, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };

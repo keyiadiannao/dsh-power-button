@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
-  APP_EXIT_WATCHDOG_MS,
+  APP_EXIT_WATCHDOG_MS, PRE_EXIT_FLUSH_CAP_MS, preExitBudgetMs, helperOldPidWaitMs, flushSessionsBounded,
 } from '../src/index.ts'
 
 describe('requestAppExit', () => {
@@ -274,5 +274,44 @@ describe('pruneOldRestartLogs', () => {
 
     expect(existsSync(oldLog)).toBe(false)
     expect(existsSync(freshLog)).toBe(true)
+  })
+
+  it('removes a stale argv-bearing helper script a killed helper left behind', () => {
+    const stale = join(testHome, 'dsh-restart-helper-4321-1.cjs')
+    const fresh = join(testHome, 'dsh-restart-helper-8765-2.cjs')
+    writeFileSync(stale, 'const relaunch = ["node"];', 'utf8')
+    writeFileSync(fresh, 'const relaunch = ["node"];', 'utf8')
+    const past = new Date(Date.now() - 10 * 24 * 3600 * 1000)
+    utimesSync(stale, past, past)
+
+    pruneOldRestartLogs(7)
+
+    expect(existsSync(stale)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+  })
+})
+
+describe('pre-exit durability barrier', () => {
+  it('settles when a session flush never settles, instead of holding the exit open', async () => {
+    const ctx = { sessions: { list: () => ['a'], flush: () => new Promise(() => {}) } }
+    const started = Date.now()
+    await flushSessionsBounded(ctx, 50)
+    expect(Date.now() - started).toBeLessThan(2_000)
+  })
+
+  // The invariant that actually matters: the helper's patience is DERIVED from
+  // the Host's worst-case exit budget. If either side is ever changed alone and
+  // the helper ends up the shorter of the two, it abandons a process that is
+  // still shutting down and nothing relaunches the harness.
+  it('keeps the helper waiting strictly longer than the host can take to exit', () => {
+    for (const delayMs of [0, 1_500, 5_000]) {
+      const budget = preExitBudgetMs(delayMs)
+      expect(budget).toBeGreaterThanOrEqual(PRE_EXIT_FLUSH_CAP_MS + delayMs + APP_EXIT_WATCHDOG_MS)
+      expect(helperOldPidWaitMs(delayMs)).toBeGreaterThan(budget)
+    }
+  })
+
+  it('tracks the restart delay, so a longer delay cannot shorten the helper bound', () => {
+    expect(helperOldPidWaitMs(5_000)).toBeGreaterThan(helperOldPidWaitMs(0))
   })
 })
