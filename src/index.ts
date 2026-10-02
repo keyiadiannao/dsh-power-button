@@ -51,14 +51,22 @@ import { createRequire } from 'node:module'
 import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
+import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
 import { SHUTDOWN_CONFIRM_REQUEST } from './protocol.ts'
+
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Restart lifecycle notices this plugin queues for the originating session. */
+    'dsh-power-button': { kind: 'dsh-power-button' } & ContextFormed
+  }
+}
 
 /** Plugin version, read from package.json so /health can report it. */
 const require = createRequire(import.meta.url)
 const PLUGIN_VERSION = (require('../package.json') as { version?: string }).version ?? '0.0.0'
 
 export const name = 'dsh-power-button'
-export const inject = ['webServer', 'tools', 'commands', 'sessions', 'settings']
+export const inject = ['webServer', 'tools', 'commands', 'sessions', 'settings', 'agents']
 
 /** Plugin configuration (editable via the profile's cordis config / settings). */
 export interface Config {
@@ -220,6 +228,115 @@ export function consumeRestartConfirmation(): { fromInstanceId: string, restartI
   try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
   if (!relaunched) return null
   return { fromInstanceId: oldId, ...(origin !== undefined ? { origin } : {}) }
+}
+
+// ---------------------------------------------------------------------------
+// Restart awareness (non-waking)
+// ---------------------------------------------------------------------------
+// A restarted harness knows something the conversation that asked for it does
+// not: the restart finished. `agent.inject()` queues model-facing context for
+// the next pre-step WITHOUT waking the driver — an idle agent leaves it pending
+// until a follow-up or steering wakes it — so the notice is already waiting the
+// next time that session runs, and the user never has to explain what happened.
+//
+// Nothing here wakes an agent, opens a turn, or writes a session event: the
+// model-visible channels that are not step-scoped would require forging one.
+
+/** Directory of notices awaiting a live agent. One file per restart. */
+function noticeDir(): string {
+  return path.join(RUNTIME_DIR, 'power-notice')
+}
+
+function noticePath(restartId: string): string {
+  return path.join(noticeDir(), `${restartId}.json`)
+}
+
+/** The one-line account the `notice` context form carries. */
+export function restartNoticeSummary(restart: { fromInstanceId: string }): string {
+  return `DeepSeek Harness restarted (replacing instance ${restart.fromInstanceId})`
+}
+
+/**
+ * Model-facing notice text: the facts this conversation cannot observe, and the
+ * one thing it must not do about them.
+ */
+export function restartNoticeText(restart: { fromInstanceId: string, restartId?: string }): string {
+  return [
+    'DeepSeek Harness lifecycle notice: this process restarted successfully.',
+    restart.restartId !== undefined ? `Restart id: ${restart.restartId}.` : '',
+    `It replaced instance ${restart.fromInstanceId}; port, profile and working directory are unchanged.`,
+    'This restart was requested by this session.',
+    'It has already happened — do not repeat it unless something is still wrong.',
+  ].filter((line) => line !== '').join(' ')
+}
+
+/**
+ * Persist one restart's notice.
+ *
+ * Written to disk rather than held in memory so a session that is not live yet
+ * still receives it after the next boot. A restart whose caller had no causal
+ * session queues nothing: an origin-less restart must never be attributed to
+ * whichever conversation happens to be open.
+ * @param restart - the restart being reported.
+ */
+export function queueRestartNotice(restart: { fromInstanceId: string, restartId?: string, origin?: RestartOrigin }): void {
+  const sessionId = restart.origin?.sessionId
+  if (sessionId === undefined || sessionId.length === 0) return
+  const restartId = restart.restartId ?? `legacy-${String(Date.now())}`
+  try {
+    writeJsonAtomic(noticePath(restartId), {
+      schemaVersion: 1,
+      restartId,
+      sessionId,
+      summary: restartNoticeSummary(restart),
+      text: restartNoticeText(restart),
+      queuedAt: new Date().toISOString(),
+    })
+  } catch { /* best-effort: a missing notice beats a failed boot */ }
+}
+
+/**
+ * Deliver every queued notice whose session is live; keep the rest queued.
+ *
+ * Idempotent by construction: a delivered notice is deleted, so a later boot
+ * cannot replay it. A notice whose session is not live is never reassigned to a
+ * different session and never wakes one — it simply waits.
+ * @param ctx - host context carrying the agent registry.
+ * @returns the number of notices delivered.
+ */
+export function deliverPendingNotices(ctx: any): number {
+  let names: string[]
+  try { names = fs.readdirSync(noticeDir()) } catch { return 0 }
+  let delivered = 0
+  for (const fileName of names) {
+    if (!fileName.endsWith('.json')) continue
+    const file = path.join(noticeDir(), fileName)
+    const record = readJsonFile(file)
+    if (record === null || typeof record.sessionId !== 'string' || typeof record.text !== 'string') {
+      // An unreadable or malformed record cannot be attributed to anyone.
+      try { fs.unlinkSync(file) } catch { /* ignore */ }
+      continue
+    }
+    const agent = ctx.agents?.get?.(record.sessionId)
+    if (agent === undefined || agent === null) continue
+    try {
+      agent.inject(createUserMessage({
+        content: [{ type: 'text', text: record.text }],
+        source: {
+          kind: 'dsh-power-button',
+          form: 'notice',
+          summary: typeof record.summary === 'string' ? record.summary : restartNoticeSummary({ fromInstanceId: record.sessionId }),
+        },
+      }))
+    } catch {
+      // A rejected inject (disposed agent, closed inbox) keeps the record for a
+      // later attempt rather than dropping the only evidence of the restart.
+      continue
+    }
+    delivered += 1
+    try { fs.unlinkSync(file) } catch { /* delivered; a stale copy is harmless */ }
+  }
+  return delivered
 }
 
 /**
@@ -1139,7 +1256,17 @@ export function apply(ctx: any, config: Config) {
     // when /health reports `restarted: true` (see src/client/RestartNotice.tsx).
     // Nothing is written into any session log, so a restart can never corrupt
     // a session file or trip the token-meter step-pairing invariant.
+    queueRestartNotice(bootRestart)
   }
+
+  // Deliver any queued restart notice whose session is live. The common case is
+  // "not live yet": the GUI resumes the conversation on reconnect, which fires
+  // `agent/created`, so delivery is retried there rather than by waking anyone.
+  deliverPendingNotices(ctx)
+  ctx.effect(() => {
+    const off = ctx.on?.('agent/created', () => { deliverPendingNotices(ctx) })
+    return () => { if (typeof off === 'function') off() }
+  }, 'dsh-power-button: restart notice delivery')
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'prefix',

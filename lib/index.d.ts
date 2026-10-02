@@ -1,5 +1,14 @@
 import z from "@deepseek-ai/schemastery";
+import { ContextFormed } from "@deepseek-ai/dsh-llm";
 //#region src/index.d.ts
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    /** Restart lifecycle notices this plugin queues for the originating session. */
+    'dsh-power-button': {
+      kind: 'dsh-power-button';
+    } & ContextFormed;
+  }
+}
 declare const name = "dsh-power-button";
 declare const inject: string[];
 /** Plugin configuration (editable via the profile's cordis config / settings). */
@@ -51,6 +60,42 @@ declare function consumeRestartConfirmation(): {
   restartId?: string;
   origin?: RestartOrigin;
 } | null;
+/** The one-line account the `notice` context form carries. */
+declare function restartNoticeSummary(restart: {
+  fromInstanceId: string;
+}): string;
+/**
+ * Model-facing notice text: the facts this conversation cannot observe, and the
+ * one thing it must not do about them.
+ */
+declare function restartNoticeText(restart: {
+  fromInstanceId: string;
+  restartId?: string;
+}): string;
+/**
+ * Persist one restart's notice.
+ *
+ * Written to disk rather than held in memory so a session that is not live yet
+ * still receives it after the next boot. A restart whose caller had no causal
+ * session queues nothing: an origin-less restart must never be attributed to
+ * whichever conversation happens to be open.
+ * @param restart - the restart being reported.
+ */
+declare function queueRestartNotice(restart: {
+  fromInstanceId: string;
+  restartId?: string;
+  origin?: RestartOrigin;
+}): void;
+/**
+ * Deliver every queued notice whose session is live; keep the rest queued.
+ *
+ * Idempotent by construction: a delivered notice is deleted, so a later boot
+ * cannot replay it. A notice whose session is not live is never reassigned to a
+ * different session and never wakes one — it simply waits.
+ * @param ctx - host context carrying the agent registry.
+ * @returns the number of notices delivered.
+ */
+declare function deliverPendingNotices(ctx: any): number;
 /**
  * Redact credential-shaped content from a command line before logging.
  * Handles both shapes:
@@ -223,4 +268,4 @@ declare function isTrustedPowerRequest(req: {
 }): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, writeMarker };

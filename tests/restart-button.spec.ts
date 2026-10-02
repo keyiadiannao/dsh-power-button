@@ -1,15 +1,16 @@
-import { existsSync, writeFileSync, utimesSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 
 // DSH_HOME is set by tests/setup.ts BEFORE this module is imported, so
 // RUNTIME_DIR (captured at module load) points at an isolated temp dir.
 const testHome = process.env.DSH_HOME as string
 
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
   APP_EXIT_WATCHDOG_MS, PRE_EXIT_FLUSH_CAP_MS, preExitBudgetMs, helperOldPidWaitMs, flushSessionsBounded,
+  queueRestartNotice, deliverPendingNotices,
 } from '../src/index.ts'
 
 describe('requestAppExit', () => {
@@ -358,5 +359,75 @@ describe('pre-exit durability barrier', () => {
 
   it('tracks the restart delay, so a longer delay cannot shorten the helper bound', () => {
     expect(helperOldPidWaitMs(5_000)).toBeGreaterThan(helperOldPidWaitMs(0))
+  })
+})
+
+describe('restart awareness', () => {
+  const noticeDir = join(testHome, 'power-notice')
+
+  // Each case owns the queue: a leftover notice from an earlier case would be
+  // delivered by a later one and make its count meaningless.
+  beforeEach(() => { rmSync(noticeDir, { recursive: true, force: true }) })
+
+  const agentFor = (sessionId: string, injected: unknown[]) => ({
+    agents: {
+      get: (id: string) => (id === sessionId ? { inject: (m: unknown) => { injected.push(m) } } : undefined),
+    },
+  })
+
+  it('queues nothing for a restart whose caller had no causal session', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-http', origin: { kind: 'http' },
+    })
+    expect(existsSync(join(noticeDir, 'r-http.json'))).toBe(false)
+  })
+
+  it('delivers into the live session and consumes the notice', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-1', origin: { kind: 'model-tool', sessionId: 'session-7' },
+    })
+    const injected: unknown[] = []
+    const ctx = agentFor('session-7', injected)
+
+    expect(deliverPendingNotices(ctx)).toBe(1)
+    expect(injected).toHaveLength(1)
+    expect((injected[0] as { role: string }).role).toBe('user')
+    expect(existsSync(join(noticeDir, 'r-1.json'))).toBe(false)
+
+    // Idempotent: nothing is left to replay on a later pass or boot.
+    expect(deliverPendingNotices(ctx)).toBe(0)
+    expect(injected).toHaveLength(1)
+  })
+
+  it('keeps the notice queued while its session is not live, and never reassigns it', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-2', origin: { kind: 'model-tool', sessionId: 'session-9' },
+    })
+    const injected: unknown[] = []
+
+    // A different session being live must not receive this restart's notice.
+    expect(deliverPendingNotices(agentFor('session-other', injected))).toBe(0)
+    expect(injected).toHaveLength(0)
+    expect(existsSync(join(noticeDir, 'r-2.json'))).toBe(true)
+
+    // When the right session goes live, it is delivered.
+    expect(deliverPendingNotices(agentFor('session-9', injected))).toBe(1)
+    expect(injected).toHaveLength(1)
+  })
+
+  it('drops a malformed record rather than attributing it to anyone', () => {
+    mkdirSync(noticeDir, { recursive: true })
+    writeFileSync(join(noticeDir, 'broken.json'), '{ not json', 'utf8')
+    expect(deliverPendingNotices(agentFor('session-7', []))).toBe(0)
+    expect(existsSync(join(noticeDir, 'broken.json'))).toBe(false)
+  })
+
+  it('keeps the notice when the inject is rejected, so a later attempt can retry', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-3', origin: { kind: 'model-tool', sessionId: 'session-7' },
+    })
+    const rejecting = { agents: { get: () => ({ inject: () => { throw new Error('disposed') } }) } }
+    expect(deliverPendingNotices(rejecting)).toBe(0)
+    expect(existsSync(join(noticeDir, 'r-3.json'))).toBe(true)
   })
 })
