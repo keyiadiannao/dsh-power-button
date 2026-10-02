@@ -298,6 +298,28 @@ interface RestartHelperPayload {
  */
 declare function buildRestartHelper(p: RestartHelperPayload): string;
 /**
+ * Shut down DSH gracefully. Prefers DSH's official `ctx.appExit` channel
+ * (launcher-provided), which disposes the plugin tree (sessions, watchers,
+ * subprocesses) with a bounded grace period instead of hard-killing via
+ * `process.exit`. Falls back to `process.exit` only when the launcher did
+ * not provide `appExit` (non-standard embedding).
+ *
+ * The exit is armed on THIS response's 'finish' so the client sees the ack
+ * before the connection drops. Nothing relaunches — the user must start DSH
+ * again manually.
+ */
+declare function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefined): {
+  ok: boolean;
+  action: string;
+  note: string;
+  error?: never;
+} | {
+  ok: boolean;
+  action: string;
+  error: string;
+  note?: never;
+};
+/**
  * Trust fence for the destructive POST endpoints. These actions kill the DSH
  * process, so a malicious webpage must not trigger them cross-origin (a
  * `fetch(..., { mode: 'no-cors' })` still sends the request even though the
@@ -333,4 +355,4 @@ declare function isTrustedPowerRequest(req: {
 }): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };

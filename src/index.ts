@@ -1303,24 +1303,38 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
  * before the connection drops. Nothing relaunches — the user must start DSH
  * again manually.
  */
-function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefined) {
+export function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefined) {
   try {
     const exitNow = (): void => {
       requestAppExit(ctx)
     }
+    // The exit is one attempt per process. Two triggers race here — this
+    // response's `finish` and a fallback timer — and `requestAppExit` is not
+    // idempotent: it calls the launcher's `appExit(0)` again and arms another
+    // watchdog each time. Relying on `appExit` to tolerate repeats would make
+    // the lifecycle depend on an implementation detail of the launcher.
+    let exitArmed = false
     // Flush every live session before exiting so the write-behind buffer is
     // durably on disk — same durability barrier as the restart path, and
     // bounded for the same reason: a flush that never settles would leave the
     // process alive after the user asked it to stop.
     const exitSoon = (): void => {
+      if (exitArmed) return
+      exitArmed = true
       void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then(exitNow)
     }
     if (res !== undefined && typeof res.once === 'function') {
       // HTTP path: exit on THIS response's 'finish' so the client sees the
       // ack before the connection drops. 500ms fallback if 'finish' never
-      // fires (e.g. client aborted).
-      res.once('finish', exitSoon)
-      setTimeout(exitSoon, 500).unref()
+      // fires (e.g. client aborted). The guard above is what makes the two
+      // triggers safe; clearing the timer keeps the normal path from leaving a
+      // pending callback behind.
+      const fallback = setTimeout(exitSoon, 500)
+      fallback.unref()
+      res.once('finish', () => {
+        clearTimeout(fallback)
+        exitSoon()
+      })
     } else {
       // Command path: no response object; exit after a short beat so the
       // command result flushes.
@@ -1540,12 +1554,12 @@ export function apply(ctx: any, config: Config) {
         name: 'restart_harness',
         description: isEnglishLocale(ctx)
           ? 'Restart the whole DeepSeek Harness process to reload plugins and config (profile cordis layers, settings, etc). '
-            + 'Provided by dsh-power-button (standalone): spawns a detached helper that waits for the old process to exit and the port to free, '
-            + 'then relaunches with the same command line and cwd, after which the old process exits. '
+            + 'Provided by dsh-power-button (standalone): spawns a detached helper that takes ownership of the relaunch, then this process exits; '
+            + 'once the old process is gone and its port is free, the helper relaunches DSH with the same command line and cwd. '
             + 'The current session connection drops briefly and the page auto-reconnects. Returns ok and a note.'
           : '重启整个 DeepSeek Harness 进程，用于重新加载插件与配置（profile 的 cordis 组合、settings 等）。'
-            + '由 dsh-power-button 提供（独立实现）：派生一个 detach 的 helper，'
-            + '在旧进程退出并释放端口后以原命令行在原目录重新拉起，然后旧进程退出。'
+            + '由 dsh-power-button 提供（独立实现）：派生一个 detach 的 helper 接管拉起职责，随后本进程退出；'
+            + '待旧进程消失且端口释放后，helper 以原命令行在原目录重新拉起 DSH。'
             + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
             + '返回 ok 与说明文本。',
         parameters: {

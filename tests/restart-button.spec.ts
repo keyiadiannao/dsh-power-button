@@ -10,8 +10,47 @@ import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
   APP_EXIT_WATCHDOG_MS, PRE_EXIT_FLUSH_CAP_MS, preExitBudgetMs, helperOldPidWaitMs, flushSessionsBounded,
-  queueRestartNotice, deliverPendingNotices, restartStatus, Config, pinRelaunchPort,
+  queueRestartNotice, deliverPendingNotices, restartStatus, Config, pinRelaunchPort, shutdownDsh,
 } from '../src/index.ts'
+
+describe('shutdownDsh exit scheduling', () => {
+  // Two triggers race — this response's `finish` and a 500ms fallback — and
+  // `requestAppExit` is not idempotent: each call reaches the launcher's
+  // `appExit(0)` again and arms another watchdog. The exit must be one attempt
+  // per process regardless, rather than depending on `appExit` tolerating
+  // repeats. Real timers: the fallback constant itself is under test.
+  it('requests the exit once when finish and the fallback timer both fire', async () => {
+    const appExit = vi.fn()
+    const ctx = {
+      get: (name: string) => (name === 'appExit' ? appExit : undefined),
+      sessions: { list: () => [] },
+    }
+    let onFinish: (() => void) | undefined
+    const res = { once: (event: string, cb: () => void) => { if (event === 'finish') onFinish = cb } }
+
+    shutdownDsh(ctx, res as never)
+    expect(onFinish).toBeTypeOf('function')
+    onFinish?.()
+    // Long enough for the flush microtask AND for the 500ms fallback to fire.
+    await new Promise((resolve) => { setTimeout(resolve, 700) })
+
+    expect(appExit).toHaveBeenCalledTimes(1)
+  })
+
+  it('still exits when finish never fires, so a dropped response cannot strand the process', async () => {
+    const appExit = vi.fn()
+    const ctx = {
+      get: (name: string) => (name === 'appExit' ? appExit : undefined),
+      sessions: { list: () => [] },
+    }
+    const res = { once: () => { /* finish never arrives */ } }
+
+    shutdownDsh(ctx, res as never)
+    await new Promise((resolve) => { setTimeout(resolve, 700) })
+
+    expect(appExit).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('requestAppExit', () => {
   it('takes the graceful launcher path when appExit resolves through ctx.get', () => {

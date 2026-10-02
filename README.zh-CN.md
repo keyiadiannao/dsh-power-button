@@ -151,10 +151,24 @@ ARM → COMMIT → ACK 握手：没有任何进程负责拉起是 UI 唯一无�
 ## 开发
 
 ```sh
-npm run build        # tsdown:host + client bundle
-npm run typecheck    # tsc --noEmit
-npm test             # vitest:marker 生命周期、delayMs 下限、argv 脱敏、日志清理、退出通道
+pnpm build            # tsdown:宿主 + 客户端 bundle(产物提交进 lib/)
+pnpm typecheck        # tsc --noEmit,覆盖 src
+pnpm typecheck:tests  # 根 tsconfig 排除了 tests/,而 vitest 只转译不做类型检查
+pnpm test             # vitest:单元 + 进程级 acceptance
+pnpm check            # 按顺序执行以上全部
 ```
+
+`tests/restart-runtime.spec.ts` 是进程级 acceptance 套件:它把宿主真正生成的
+helper 脚本(`buildRestartHelper`)**原样**作为真实进程执行,在真实 TCP 端口上对两个
+假 DSH target 运行,锁定单测无法证明的那些事——完整拉起链路、没有宿主 COMMIT 就不
+拉起、spawn 重试上限为三、健康门禁拒绝旧 instanceId 的回答,以及 `--port 0` 重启后
+新实例确实落在旧进程实际绑定的端口上(新实例的 argv 走插件自己的 `pinRelaunchPort`,
+因此测的是修复本身而非复述它)。
+
+CI 在 Windows / Ubuntu / macOS 上运行:install、两项 typecheck、测试、build、
+"提交的 `lib/` 必须与全新构建逐字节一致"的门禁(git 安装直接跑这些产物,所以它们
+必须就是源码的产物),以及 `pnpm pack` 后校验发布 tarball 确实包含 `lib/` 与
+`cordis.patch.yml`。
 
 测试通过 vitest setup 文件隔离 `DSH_HOME`,不会触碰真实的 `~/.dsh`。
 产物:host 在 `lib/index.js`,client bundle 在 `lib/client.js`(均已入库,git 安装免构建)。

@@ -184,17 +184,27 @@ Mechanics:
 ## Development
 
 ```sh
-npm run build        # tsdown: host + client bundle
-npm run typecheck    # tsc --noEmit
-npm test             # vitest: marker lifecycle (v1 + v2 launch token), delayMs clamp, argv redaction, log pruning, exit channel
+pnpm build            # tsdown: host + client bundle (committed to lib/)
+pnpm typecheck        # tsc --noEmit over src
+pnpm typecheck:tests  # the root tsconfig excludes tests/, and vitest only transpiles them
+pnpm test             # vitest: unit + process-level acceptance
+pnpm check            # all of the above, in order
 ```
+
+CI runs on Windows, Ubuntu and macOS: install, both typechecks, tests, build, a
+gate that the committed `lib/` matches a fresh build byte for byte (a git install
+runs those artifacts, so they must be what the source produces), and a `pnpm pack`
+check that the published tarball actually contains `lib/` and `cordis.patch.yml`.
 
 `tests/restart-runtime.spec.ts` is a process-level acceptance suite: it
 executes the EXACT helper script the host generates (`buildRestartHelper`) as
 a real process against two fake DSH targets on a real TCP port, and pins the
-four outcomes that unit tests cannot prove — the full relaunch chain, no
-relaunch without the host's COMMIT, spawn retries bounded at three, and the
-health gate refusing an old-instanceId answer.
+outcomes that unit tests cannot prove — the full relaunch chain, no relaunch
+without the host's COMMIT, spawn retries bounded at three, the health gate
+refusing an old-instanceId answer, and a `--port 0` restart landing the
+successor on the port the old process actually bound (the successor's argv goes
+through the plugin's own `pinRelaunchPort`, so the test exercises the fix rather
+than restating it).
 
 Tests isolate `DSH_HOME` via a vitest setup file, so they never touch your
 real `~/.dsh`. Artifacts: host at `lib/index.js`, client bundle at
