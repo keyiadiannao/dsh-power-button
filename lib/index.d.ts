@@ -16,6 +16,19 @@ interface Config {
 declare const Config: z<Config>;
 /** Per-port marker path. Exported for tests (isolated via DSH_HOME). */
 declare function markerPath(): string;
+/**
+ * Who asked for a restart.
+ *
+ * `sessionId` is only ever recorded from a caller that actually has a causal
+ * agent: the model tool's `exec.agent` or the command's `invocation.agent`. A
+ * plain HTTP POST has none, and guessing one would attribute the restart — and
+ * any notice derived from it — to an unrelated conversation.
+ */
+interface RestartOrigin {
+  kind: 'model-tool' | 'command' | 'http';
+  /** The session that asked, when the caller has one. Never guessed. */
+  sessionId?: string;
+}
 /** Record restart intent. Exported for tests (isolated via DSH_HOME). */
 declare function writeMarker(data: Record<string, unknown>): void;
 /**
@@ -36,6 +49,7 @@ declare function writeMarker(data: Record<string, unknown>): void;
 declare function consumeRestartConfirmation(): {
   fromInstanceId: string;
   restartId?: string;
+  origin?: RestartOrigin;
 } | null;
 /**
  * Redact credential-shaped content from a command line before logging.
@@ -163,6 +177,9 @@ interface RestartHelperPayload {
    */
   oldPidWaitMs: number;
   requestedAt: string;
+  /** Who asked, recorded so the new process can attribute the restart without
+   * guessing. Absent when the caller had no causal session. */
+  origin?: RestartOrigin;
 }
 /**
  * Generate the detached restart helper. A pure function of the payload: the
@@ -206,4 +223,4 @@ declare function isTrustedPowerRequest(req: {
 }): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, preExitBudgetMs, pruneOldRestartLogs, redactCommandLine, requestAppExit, writeMarker };

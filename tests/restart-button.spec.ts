@@ -167,6 +167,51 @@ describe('restart marker lifecycle v2 (launch token)', () => {
     expect(existsSync(markerPath())).toBe(false)
   })
 
+  it('carries the recorded restart origin back to the relaunched instance', () => {
+    writeMarker({
+      schemaVersion: 2,
+      restartId: 'restart-1',
+      fromInstanceId: 'instance-A',
+      origin: { kind: 'model-tool', sessionId: 'session-7' },
+      requestedAt: new Date().toISOString(),
+    })
+    process.env.DSH_POWER_RESTART_ID = 'restart-1'
+    expect(consumeRestartConfirmation()).toEqual({
+      fromInstanceId: 'instance-A',
+      restartId: 'restart-1',
+      origin: { kind: 'model-tool', sessionId: 'session-7' },
+    })
+  })
+
+  it('drops a malformed origin rather than trusting it as an attribution', () => {
+    // The marker is durable input written by a previous process, so an
+    // unrecognized producer must not be reported as the restart's origin.
+    writeMarker({
+      schemaVersion: 2,
+      restartId: 'restart-1',
+      fromInstanceId: 'instance-A',
+      origin: { kind: 'something-else', sessionId: 'session-7' },
+      requestedAt: new Date().toISOString(),
+    })
+    process.env.DSH_POWER_RESTART_ID = 'restart-1'
+    expect(consumeRestartConfirmation()).toEqual({
+      fromInstanceId: 'instance-A',
+      restartId: 'restart-1',
+    })
+  })
+
+  it('keeps an origin without a session id, for a caller that has no causal agent', () => {
+    writeMarker({
+      schemaVersion: 2,
+      restartId: 'restart-1',
+      fromInstanceId: 'instance-A',
+      origin: { kind: 'http' },
+      requestedAt: new Date().toISOString(),
+    })
+    process.env.DSH_POWER_RESTART_ID = 'restart-1'
+    expect(consumeRestartConfirmation()?.origin).toEqual({ kind: 'http' })
+  })
+
   it('rejects a v2 marker whose token does not match this boot', () => {
     writeMarker({
       schemaVersion: 2,

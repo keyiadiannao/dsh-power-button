@@ -108,13 +108,27 @@ export function markerPath(): string {
  * than "saw a down, then an up" — works even if the down was missed). */
 const INSTANCE_ID = randomUUID()
 
+/**
+ * Who asked for a restart.
+ *
+ * `sessionId` is only ever recorded from a caller that actually has a causal
+ * agent: the model tool's `exec.agent` or the command's `invocation.agent`. A
+ * plain HTTP POST has none, and guessing one would attribute the restart — and
+ * any notice derived from it — to an unrelated conversation.
+ */
+export interface RestartOrigin {
+  kind: 'model-tool' | 'command' | 'http'
+  /** The session that asked, when the caller has one. Never guessed. */
+  sessionId?: string
+}
+
 /** Set at apply time when this process is the freshly-restarted instance.
  * Split from the toast acknowledgement: `bootRestart` is this process's
  * restart IDENTITY — immutable for its lifetime, reported on /health as
  * `restart` forever, so the helper (and future diagnostics) can always tell a
  * relaunched instance from a fresh boot. `restartNoticePending` is only the
  * UI toast state; ACKing it (/notice-shown) must not erase the identity. */
-let bootRestart: { fromInstanceId: string, restartId?: string } | null = null
+let bootRestart: { fromInstanceId: string, restartId?: string, origin?: RestartOrigin } | null = null
 let restartNoticePending = false
 
 /** Unique helper file + per-pid log so concurrent DSH instances (e.g. a
@@ -147,6 +161,20 @@ export function writeMarker(data: Record<string, unknown>): void {
 }
 
 /**
+ * Read a recorded restart origin, discarding anything malformed. The marker is
+ * durable input that outlives the process that wrote it, so an unrecognized
+ * kind is dropped rather than trusted as an attribution.
+ */
+function readRestartOrigin(value: unknown): RestartOrigin | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const kind = record.kind
+  if (kind !== 'model-tool' && kind !== 'command' && kind !== 'http') return undefined
+  const sessionId = record.sessionId
+  return typeof sessionId === 'string' && sessionId.length > 0 ? { kind, sessionId } : { kind }
+}
+
+/**
  * Whether THIS process is the freshly-restarted instance. Exported for tests.
  *
  * Two marker generations are accepted:
@@ -161,7 +189,7 @@ export function writeMarker(data: Record<string, unknown>): void {
  *    spawning by recording the exact child pid. Still accepted so the first
  *    restart performed by a pre-upgrade detached helper still reports.
  */
-export function consumeRestartConfirmation(): { fromInstanceId: string, restartId?: string } | null {
+export function consumeRestartConfirmation(): { fromInstanceId: string, restartId?: string, origin?: RestartOrigin } | null {
   // Read-and-delete the launch token FIRST: it belongs to this boot's judgment
   // only, and must not leak to MCP children or survive into a later decision.
   const envRestartId = process.env.DSH_POWER_RESTART_ID
@@ -174,13 +202,14 @@ export function consumeRestartConfirmation(): { fromInstanceId: string, restartI
     try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
     return null
   }
+  const origin = readRestartOrigin(marker.origin)
   if (marker.schemaVersion === 2 && typeof marker.restartId === 'string') {
     try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
     // Without the matching launch token this is an unrelaunched intent (the
     // helper died before spawning) or a MANUAL boot: neither may claim the
     // restart, and the leftover marker is cleared so it cannot linger.
     if (envRestartId !== undefined && marker.restartId === envRestartId) {
-      return { fromInstanceId: oldId, restartId: marker.restartId }
+      return { fromInstanceId: oldId, restartId: marker.restartId, ...(origin !== undefined ? { origin } : {}) }
     }
     return null
   }
@@ -190,7 +219,7 @@ export function consumeRestartConfirmation(): { fromInstanceId: string, restartI
     && (marker.newPid as number) === process.pid
   try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
   if (!relaunched) return null
-  return { fromInstanceId: oldId }
+  return { fromInstanceId: oldId, ...(origin !== undefined ? { origin } : {}) }
 }
 
 /**
@@ -576,6 +605,9 @@ export interface RestartHelperPayload {
    */
   oldPidWaitMs: number
   requestedAt: string
+  /** Who asked, recorded so the new process can attribute the restart without
+   * guessing. Absent when the caller had no causal session. */
+  origin?: RestartOrigin
 }
 
 /**
@@ -608,6 +640,7 @@ const READY_WAIT_MS = ${p.readyWaitMs};
 const OLD_PID_WAIT_MS = ${p.oldPidWaitMs};
 const RELAUNCH_RETRIES = 3;
 const REQUESTED_AT = ${JSON.stringify(p.requestedAt)};
+const ORIGIN = ${JSON.stringify(p.origin ?? null)};
 function log(m) {
   try { fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\\n'); } catch {}
 }
@@ -677,6 +710,7 @@ function sessionsQuiescent(maxWaitMs) {
     port: PORT,
     oldPid: OLD_PID,
     fromInstanceId: OLD_INSTANCE,
+    origin: ORIGIN,
     requestedAt: REQUESTED_AT,
   };
   function patchStatus(patch) {
@@ -810,6 +844,7 @@ function sessionsQuiescent(maxWaitMs) {
         schemaVersion: 2,
         restartId: RESTART_ID,
         fromInstanceId: OLD_INSTANCE,
+        origin: ORIGIN,
         requestedAt: REQUESTED_AT,
       }), 'utf8');
     } catch {}
@@ -847,7 +882,7 @@ function sessionsQuiescent(maxWaitMs) {
  * `ok: false` and leaves this process running: the caller must be able to
  * report a failed restart instead of ending up with no process at all.
  */
-async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string }> {
+async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string }> {
   const restartId = randomUUID()
   let helper: ChildProcess | undefined
   try {
@@ -883,6 +918,7 @@ async function restartDsh(ctx: any, delayMs = 1500): Promise<{ ok: boolean, acti
       // completing and nothing relaunches.
       oldPidWaitMs: helperOldPidWaitMs(delayMs),
       requestedAt: new Date().toISOString(),
+      ...(origin !== undefined ? { origin } : {}),
     })
     fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
     // 0600: the helper embeds the full relaunch argv, which can carry
@@ -1121,7 +1157,8 @@ export function apply(ctx: any, config: Config) {
           if (!claimPowerTransition('restart')) {
             return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition}` })
           }
-          const result = await restartDsh(ctx)
+          // A plain POST carries no causal session, and one is never guessed.
+          const result = await restartDsh(ctx, undefined, { kind: 'http' })
           if (!result.ok) releasePowerTransition()
           return json(res, result.ok ? 200 : 500, result)
         }
@@ -1216,7 +1253,7 @@ export function apply(ctx: any, config: Config) {
             return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
           },
         },
-        async execute(args: unknown) {
+        async execute(args: unknown, exec: { agent?: { session: { id: unknown } } }) {
           const a = (args ?? {}) as { delayMs?: number }
           // Floor the model-visible delay: the restart tool must never be able
           // to kill the process before its own tool/result and turn boundary
@@ -1228,7 +1265,13 @@ export function apply(ctx: any, config: Config) {
           if (!claimPowerTransition('restart')) {
             return { ok: false, error: `power transition already in progress: ${powerTransition}` }
           }
-          const result = await restartDsh(ctx, clamped)
+          // The causal agent is the only trustworthy source for "which
+          // conversation asked": read it, never infer it.
+          const sessionId = exec?.agent?.session?.id
+          const origin: RestartOrigin = typeof sessionId === 'string' && sessionId.length > 0
+            ? { kind: 'model-tool', sessionId }
+            : { kind: 'model-tool' }
+          const result = await restartDsh(ctx, clamped, origin)
           if (!result.ok) releasePowerTransition()
           return result
         },
@@ -1260,11 +1303,16 @@ export function apply(ctx: any, config: Config) {
           ? 'Restart DeepSeek Harness (reload plugins & config)'
           : '重启 DeepSeek Harness（重载插件与配置）',
         recordInput: false,
-        async handler() {
+        async handler(invocation: { agent?: { session: { id: unknown } } }) {
           if (!claimPowerTransition('restart')) {
             return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
           }
-          const result = await restartDsh(ctx)
+          // The dispatching UI's agent is the causal session for this command.
+          const sessionId = invocation?.agent?.session?.id
+          const origin: RestartOrigin = typeof sessionId === 'string' && sessionId.length > 0
+            ? { kind: 'command', sessionId }
+            : { kind: 'command' }
+          const result = await restartDsh(ctx, undefined, origin)
           if (!result.ok) releasePowerTransition()
           return result.ok
             ? { kind: 'success', text: result.note }
