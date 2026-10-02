@@ -73,7 +73,8 @@ declare function restartNoticeText(restart: {
   restartId?: string;
 }): string;
 /**
- * Persist one restart's notice.
+ * Persist one restart's notice, replacing any notice already queued for the
+ * same session.
  *
  * Written to disk rather than held in memory so a session that is not live yet
  * still receives it after the next boot. A restart whose caller had no causal
@@ -91,7 +92,8 @@ declare function queueRestartNotice(restart: {
  *
  * Idempotent by construction: a delivered notice is deleted, so a later boot
  * cannot replay it. A notice whose session is not live is never reassigned to a
- * different session and never wakes one — it simply waits.
+ * different session and never wakes one — it simply waits. At most one notice
+ * per session exists, so a reconnecting session receives at most one.
  * @param ctx - host context carrying the agent registry.
  * @returns the number of notices delivered.
  */
@@ -165,6 +167,9 @@ declare function requestAppExit(ctx: any, fallbackExit?: () => void, watchdogMs?
  * on a path the helper reaches itself. A helper that is killed instead of
  * finishing — the Host kills a half-armed one when the handshake fails — never
  * reaches cleanup(), so the argv-bearing file would otherwise stay forever.
+ *
+ * Queued restart notices are pruned on the same window: one whose session never
+ * comes back must not describe a restart that has long stopped mattering.
  * Best-effort, never throws. */
 declare function pruneOldRestartLogs(maxAgeDays?: number): void;
 /**

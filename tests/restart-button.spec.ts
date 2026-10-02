@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 
 // DSH_HOME is set by tests/setup.ts BEFORE this module is imported, so
@@ -335,6 +335,22 @@ describe('pruneOldRestartLogs', () => {
     expect(existsSync(stale)).toBe(false)
     expect(existsSync(fresh)).toBe(true)
   })
+
+  it('removes a stale restart notice whose session never came back', () => {
+    const dir = join(testHome, 'power-notice')
+    mkdirSync(dir, { recursive: true })
+    const stale = join(dir, 'r-stale.json')
+    const fresh = join(dir, 'r-fresh.json')
+    writeFileSync(stale, '{}', 'utf8')
+    writeFileSync(fresh, '{}', 'utf8')
+    const past = new Date(Date.now() - 10 * 24 * 3600 * 1000)
+    utimesSync(stale, past, past)
+
+    pruneOldRestartLogs(7)
+
+    expect(existsSync(stale)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+  })
 })
 
 describe('pre-exit durability barrier', () => {
@@ -429,6 +445,39 @@ describe('restart awareness', () => {
     const rejecting = { agents: { get: () => ({ inject: () => { throw new Error('disposed') } }) } }
     expect(deliverPendingNotices(rejecting)).toBe(0)
     expect(existsSync(join(noticeDir, 'r-3.json'))).toBe(true)
+  })
+
+  it('coalesces to the newest notice for a session, so a closed session gets one not a backlog', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-old', origin: { kind: 'model-tool', sessionId: 'session-7' },
+    })
+    queueRestartNotice({
+      fromInstanceId: 'instance-B', restartId: 'r-new', origin: { kind: 'model-tool', sessionId: 'session-7' },
+    })
+    expect(readdirSync(noticeDir)).toEqual(['r-new.json'])
+
+    const injected: unknown[] = []
+    expect(deliverPendingNotices(agentFor('session-7', injected))).toBe(1)
+    // What arrives describes the newest restart, not the superseded one.
+    expect(JSON.stringify(injected[0])).toContain('instance-B')
+    expect(JSON.stringify(injected[0])).not.toContain('instance-A')
+  })
+
+  it('coalescing one session leaves another session\'s notice queued', () => {
+    queueRestartNotice({
+      fromInstanceId: 'instance-A', restartId: 'r-a', origin: { kind: 'model-tool', sessionId: 'session-1' },
+    })
+    queueRestartNotice({
+      fromInstanceId: 'instance-B', restartId: 'r-b', origin: { kind: 'model-tool', sessionId: 'session-2' },
+    })
+    expect(readdirSync(noticeDir).sort()).toEqual(['r-a.json', 'r-b.json'])
+  })
+
+  it('drops a notice with no one-line account rather than inventing one', () => {
+    mkdirSync(noticeDir, { recursive: true })
+    writeFileSync(join(noticeDir, 'r-nosummary.json'), JSON.stringify({ sessionId: 'session-7', text: 'x' }), 'utf8')
+    expect(deliverPendingNotices(agentFor('session-7', []))).toBe(0)
+    expect(existsSync(join(noticeDir, 'r-nosummary.json'))).toBe(false)
   })
 })
 

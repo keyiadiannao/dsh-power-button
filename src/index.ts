@@ -239,10 +239,14 @@ export function consumeRestartConfirmation(): { fromInstanceId: string, restartI
 // until a follow-up or steering wakes it — so the notice is already waiting the
 // next time that session runs, and the user never has to explain what happened.
 //
-// Nothing here wakes an agent, opens a turn, or writes a session event: the
-// model-visible channels that are not step-scoped would require forging one.
+// Nothing here wakes an agent, opens a turn, or appends a model-visible message
+// itself. Delivery goes through `Agent.inject()`, which durably stages an
+// `agent/inbox/spliced` record and lets the next legitimate step claim it. That
+// distinction is the point: this plugin never forges a turn, a user message, or
+// a crash tail — every model-visible channel that is not step-scoped would
+// require exactly that.
 
-/** Directory of notices awaiting a live agent. One file per restart. */
+/** Directory of notices awaiting a live agent, at most one per session. */
 function noticeDir(): string {
   return path.join(RUNTIME_DIR, 'power-notice')
 }
@@ -271,7 +275,29 @@ export function restartNoticeText(restart: { fromInstanceId: string, restartId?:
 }
 
 /**
- * Persist one restart's notice.
+ * Drop every queued notice already addressed to one session.
+ *
+ * A notice says "here is what happened while you were away, do not repeat it",
+ * so only the newest one for a session is true. Without this, a session that
+ * stays closed across several restarts would collect the whole backlog and
+ * receive it in one burst, in directory order, when it finally reopens.
+ * @param sessionId - the session whose queued notices are superseded.
+ */
+function dropNoticesForSession(sessionId: string): void {
+  let names: string[]
+  try { names = fs.readdirSync(noticeDir()) } catch { return }
+  for (const fileName of names) {
+    if (!fileName.endsWith('.json')) continue
+    const file = path.join(noticeDir(), fileName)
+    const record = readJsonFile(file)
+    if (record?.sessionId !== sessionId) continue
+    try { fs.unlinkSync(file) } catch { /* superseded; a stale copy is harmless */ }
+  }
+}
+
+/**
+ * Persist one restart's notice, replacing any notice already queued for the
+ * same session.
  *
  * Written to disk rather than held in memory so a session that is not live yet
  * still receives it after the next boot. A restart whose caller had no causal
@@ -284,6 +310,7 @@ export function queueRestartNotice(restart: { fromInstanceId: string, restartId?
   if (sessionId === undefined || sessionId.length === 0) return
   const restartId = restart.restartId ?? `legacy-${String(Date.now())}`
   try {
+    dropNoticesForSession(sessionId)
     writeJsonAtomic(noticePath(restartId), {
       schemaVersion: 1,
       restartId,
@@ -300,7 +327,8 @@ export function queueRestartNotice(restart: { fromInstanceId: string, restartId?
  *
  * Idempotent by construction: a delivered notice is deleted, so a later boot
  * cannot replay it. A notice whose session is not live is never reassigned to a
- * different session and never wakes one — it simply waits.
+ * different session and never wakes one — it simply waits. At most one notice
+ * per session exists, so a reconnecting session receives at most one.
  * @param ctx - host context carrying the agent registry.
  * @returns the number of notices delivered.
  */
@@ -312,8 +340,12 @@ export function deliverPendingNotices(ctx: any): number {
     if (!fileName.endsWith('.json')) continue
     const file = path.join(noticeDir(), fileName)
     const record = readJsonFile(file)
-    if (record === null || typeof record.sessionId !== 'string' || typeof record.text !== 'string') {
-      // An unreadable or malformed record cannot be attributed to anyone.
+    if (record === null
+      || typeof record.sessionId !== 'string'
+      || typeof record.text !== 'string'
+      || typeof record.summary !== 'string') {
+      // An unreadable, incomplete or malformed record cannot be attributed to
+      // anyone, and has no one-line account to present.
       try { fs.unlinkSync(file) } catch { /* ignore */ }
       continue
     }
@@ -325,7 +357,7 @@ export function deliverPendingNotices(ctx: any): number {
         source: {
           kind: 'dsh-power-button',
           form: 'notice',
-          summary: typeof record.summary === 'string' ? record.summary : restartNoticeSummary({ fromInstanceId: record.sessionId }),
+          summary: record.summary,
         },
       }))
     } catch {
@@ -526,6 +558,9 @@ export function requestAppExit(
  * on a path the helper reaches itself. A helper that is killed instead of
  * finishing — the Host kills a half-armed one when the handshake fails — never
  * reaches cleanup(), so the argv-bearing file would otherwise stay forever.
+ *
+ * Queued restart notices are pruned on the same window: one whose session never
+ * comes back must not describe a restart that has long stopped mattering.
  * Best-effort, never throws. */
 export function pruneOldRestartLogs(maxAgeDays = 7): void {
   const cutoff = Date.now() - maxAgeDays * 24 * 3600 * 1000
@@ -546,6 +581,9 @@ export function pruneOldRestartLogs(maxAgeDays = 7): void {
     (name.startsWith('restart-helper-') && name.endsWith('.log'))
     || (name.startsWith('dsh-restart-helper-') && name.endsWith('.cjs')))
   prune(restartDir(), (name) => name.endsWith('.status.json') || name.endsWith('.commit.json'))
+  // A notice whose session never comes back would otherwise wait forever and
+  // then describe a restart that is long irrelevant.
+  prune(noticeDir(), (name) => name.endsWith('.json'))
 }
 
 /** Boot breadcrumb with an ALLOWLIST of diagnostic fields only. The full
