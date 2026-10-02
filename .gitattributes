@@ -1,0 +1,16 @@
+# Committed build artifacts (lib/) embed the source text in their sourcemaps,
+# so line endings are part of the artifact bytes. Without a fixed checkout
+# flavour, a CRLF working tree and an LF working tree produce different maps
+# and the committed-lib freshness gate cannot pass on both.
+#
+# Force LF everywhere. This is the flavour CI checks out, and the one the
+# committed lib/ artifacts are built from.
+* text=auto eol=lf
+
+# Assets: never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
