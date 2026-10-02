@@ -439,22 +439,32 @@ export function restartStatus(ctx: any): Record<string, unknown> {
   const elapsedMs = typeof requestedAt === 'string' && typeof readyAt === 'string'
     ? Date.parse(readyAt) - Date.parse(requestedAt)
     : undefined
-  return {
-    found: true,
-    // True only when this running process is the one that restart produced.
-    isCurrentBoot: record === null ? bootRestart !== null : recordDescribesThisBoot(record),
-    thisInstanceId: INSTANCE_ID,
+  // Absent fields are OMITTED, never set to undefined. Tool output must survive
+  // a JSON round trip (`JSON.stringify` drops undefined-valued keys, so an
+  // object carrying one is not lossless), and DSH rejects a tool result that
+  // fails that check.
+  const optional: Record<string, unknown> = {
     restartId: record?.restartId ?? bootRestart?.restartId,
     stage: record?.stage,
     fromInstanceId: record?.fromInstanceId ?? bootRestart?.fromInstanceId,
     toInstanceId: record?.toInstanceId,
     requestedAt,
     readyAt,
-    ...(elapsedMs !== undefined && Number.isFinite(elapsedMs) ? { elapsedMs } : {}),
+    elapsedMs: elapsedMs !== undefined && Number.isFinite(elapsedMs) ? elapsedMs : undefined,
     origin: record?.origin ?? bootRestart?.origin,
     sessionQuiescent: record?.sessionQuiescent,
     failure: record?.failure,
   }
+  const status: Record<string, unknown> = {
+    found: true,
+    // True only when this running process is the one that restart produced.
+    isCurrentBoot: record === null ? bootRestart !== null : recordDescribesThisBoot(record),
+    thisInstanceId: INSTANCE_ID,
+  }
+  for (const [key, value] of Object.entries(optional)) {
+    if (value !== undefined) status[key] = value
+  }
+  return status
 }
 
 /**

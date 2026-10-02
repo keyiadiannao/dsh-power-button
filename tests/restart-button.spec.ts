@@ -603,4 +603,24 @@ describe('restartStatus', () => {
       failure: { code: 'health-timeout' },
     })
   })
+
+  // DSH rejects a tool result that is not lossless JSON. An object carrying an
+  // `undefined` value is not: JSON.stringify drops the key, so it cannot be
+  // round-tripped. A record only some of whose fields are present is the case
+  // that produces them, and this is what a live run tripped over.
+  it('survives a JSON round trip when the record is sparse', () => {
+    const port = 31_994
+    writeFileSync(recordFile(port), JSON.stringify({
+      fromInstanceId: 'instance-A',
+      stage: 'armed',
+    }), 'utf8')
+    const status = restartStatus(ctxForPort(port))
+    expect(JSON.parse(JSON.stringify(status))).toEqual(status)
+  })
+
+  it('survives a JSON round trip when no restart has been recorded', () => {
+    const status = restartStatus(ctxForPort(31_993))
+    expect(status).toEqual({ found: false })
+    expect(JSON.parse(JSON.stringify(status))).toEqual(status)
+  })
 })
