@@ -63,8 +63,9 @@ describe('requestAppExit', () => {
 
   it('hard-exits when the graceful exit never lands', () => {
     // Regression: an unbounded graceful exit let one lingering handle keep the
-    // process alive past the restart helper's 30s patience; the helper then
-    // gave up WITHOUT relaunching, so a restart could leave no server at all.
+    // process alive past the bound the helper derives for the old pid; the
+    // helper then gave up WITHOUT relaunching, so a restart could leave no
+    // server at all.
     vi.useFakeTimers()
     try {
       const appExit = vi.fn()
@@ -82,10 +83,11 @@ describe('requestAppExit', () => {
 
   it('keeps the watchdog after DSH\'s own grace and inside the helper\'s patience', () => {
     // DSH force-exits itself after a 5s disposal grace, so a healthy dispose
-    // must get to finish first; the restart helper polls the old pid for
-    // 60 x 500ms before giving up, so the watchdog must fire well before that.
+    // must get to finish first. The helper's patience is derived from this
+    // budget rather than fixed at 30s, so the upper bound is asserted against
+    // that derivation instead of a constant that could drift away from it.
     expect(APP_EXIT_WATCHDOG_MS).toBeGreaterThan(5_000)
-    expect(APP_EXIT_WATCHDOG_MS).toBeLessThan(30_000)
+    expect(APP_EXIT_WATCHDOG_MS).toBeLessThan(helperOldPidWaitMs(1_500))
   })
 
   it('never reads appExit off the property proxy', () => {

@@ -106,7 +106,9 @@ ARM → COMMIT → ACK 握手：没有任何进程负责拉起是 UI 唯一无�
 
 ## 安全
 
-- 破坏性 POST 带 **同源/loopback 防护**(CSRF):socket 必须是 loopback、`Host` 必须是 loopback 权威、浏览器 `Origin` 必须匹配
+- 破坏性 POST 带 **同源/loopback 防护**(CSRF):socket 必须是 loopback、`Host` 必须是 loopback 权威、浏览器 `Origin` 必须匹配。`/api/dsh-power-button/*` 比官方 `/api` 路由更长,因此最长前缀匹配**不会**把这些请求交给 DSH 自己的 trust fence——这道防护是它们唯一的防线
+- 该防护采用与 DSH 官方 fence **相同的规则**,但有一处**刻意更窄**:只接受 `127.0.0.1`、`::1`、`localhost` 作为 loopback,而官方 helper 接受整个 `127/8`。更窄不会放进任何官方会拒绝的请求;代价是若 DSH 将来监听别的 `127/8` 地址,它自己的路由会正常响应而这些端点会返回 403
+- `Origin` 比较的是完整 authority,与上游一致。若浏览器真的发出不带端口的 loopback `Origin`(有报告,但并非标准),两个 fence 都会拒绝——本插件不会单方面放宽,`tests/trust-fence.spec.ts` 固定了当前行为,使改动必须是刻意的而非漂移出来的
 - **at-most-once 锁**:并发重复触发会被拒绝(第二次返回 `409`)
 - 模型工具 `delayMs` **下限 1000 ms**——模型无法在自身 turn 结束前杀掉进程
 - 重启 marker 在启动时**消费即删除**,后续普通启动不会误报"重启过"

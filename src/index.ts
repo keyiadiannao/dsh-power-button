@@ -27,8 +27,10 @@
  *     mangled on Windows (CreateProcess command line) and dies with a silent
  *     SyntaxError — the button then "restarts" into a dead instance.
  *   - The helper waits for the listen port to free, then relaunches DSH with
- *     the SAME execPath/execArgv/argv/cwd as the current process. The old
- *     process self-exits after a short delay so the HTTP response flushes.
+ *     the same invocation and cwd. An ephemeral `--port 0` is pinned to the
+ *     port this process actually bound, so the successor lands where the helper
+ *     is waiting. The old process self-exits after a short delay so the HTTP
+ *     response flushes.
  *   - No taskkill /T /F (it walks the parent-child chain and kills the helper),
  *     no PowerShell (window popup + quoting traps).
  *
@@ -602,10 +604,11 @@ function hardExit(): void {
  * application tree with its own 5s cap, but that cap only force-exits while
  * disposal is still running — a disposal that resolves early leaves the
  * process to end on its own, and one lingering handle (background job, MCP
- * child, plugin-owned listener) then keeps the loop alive. The restart helper
- * waits 30s for the old pid and gives up WITHOUT relaunching, so an unbounded
- * graceful exit can leave the user with no server at all. 15s clears DSH's own
- * 5s grace and still lands well inside the helper's patience.
+ * child, plugin-owned listener) then keeps the loop alive. The helper gives up
+ * on the old pid after {@link helperOldPidWaitMs}'s derived bound, and quitting
+ * then means WITHOUT relaunching, so an unbounded graceful exit can leave the
+ * user with no server at all. 15s clears DSH's own 5s grace and stays inside
+ * that bound, which is computed from this constant.
  */
 export const APP_EXIT_WATCHDOG_MS = 15_000
 
@@ -1358,9 +1361,9 @@ export function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | 
  * `fetch(..., { mode: 'no-cors' })` still sends the request even though the
  * response is unreadable).
  *
- * Defense in depth — mirrors the official DSH browser-trust fence
- * (`isTrustedApiRequest` in dsh-client-connection) without importing the
- * client package:
+ * Defense in depth — applies the official DSH browser-trust rules
+ * (`isTrustedApiRequest` in dsh-client-connection) without importing the client
+ * package:
  *   1. Loopback socket check — the request must arrive on 127.0.0.1/::1.
  *   2. Host-header fence (DNS-rebinding defense): Host must be loopback or a
  *      bare 127.0.0.1 authority — a rebound page carries the attacker's
@@ -1369,6 +1372,20 @@ export function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | 
  *   4. Origin fence: when a browser attaches Origin it must equal Host
  *      (normalized); absent Origin is fine (curl/non-browser — Host already
  *      bound the request).
+ *
+ * Two deliberate differences from the official helper. Both are narrower, so
+ * neither can admit a request the official fence would refuse:
+ *   - Which hostnames count as loopback. The official `isLoopbackHostname`
+ *     accepts the whole of 127/8 (`127.0.0.2` included); this accepts only
+ *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost. These endpoints kill the
+ *     process, and the plugin only ever serves loopback, so the wider set buys
+ *     nothing here.
+ *   - The rules are reimplemented rather than imported, because the client
+ *     connection package is a client-side dependency this host plugin does not
+ *     take.
+ * An upstream change to either rule does not reach this fence by itself: the
+ * security regression suite below pins the current behaviour, so aligning is a
+ * deliberate edit rather than something that happens by drift.
  *
  * NOTE: our `/api/dsh-power-button/*` prefix is LONGER than the official
  * `/api` route, so webServer's longest-prefix-wins matching means these
@@ -1509,7 +1526,8 @@ export function apply(ctx: any, config: Config) {
             lifecycle: powerTransition ?? 'ready',
             // Surfaces whether the launcher-provided exit channel resolves, so
             // a host where restarts silently fall back to process.exit is
-            // diagnosable from a single request instead of from a 30s stall.
+            // diagnosable from a single request instead of from a restart that
+            // only fails much later.
             appExit: typeof ctx.get?.('appExit') === 'function' ? 'available' : 'missing',
           }
           // Restart IDENTITY: permanent for this process's lifetime — the

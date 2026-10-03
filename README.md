@@ -108,7 +108,9 @@ Design notes (from real issues hit during development):
 
 ## Safety
 
-- Destructive POSTs are protected by a **same-origin / loopback guard** (CSRF): the socket must be loopback, `Host` must be a loopback authority, and a browser `Origin` must match.
+- Destructive POSTs are protected by a **same-origin / loopback guard** (CSRF): the socket must be loopback, `Host` must be a loopback authority, and a browser `Origin` must match. `/api/dsh-power-button/*` is longer than the official `/api` route, so longest-prefix matching never routes these requests through DSH's own trust fence — this guard is the only one they get.
+- That guard applies the **same rules** as DSH's official fence but is deliberately **narrower in one place**: it accepts only `127.0.0.1`, `::1` and `localhost` as loopback, where the official helper accepts the whole of `127/8`. Narrower cannot admit anything the official fence refuses; the cost is that if DSH ever serves another `127/8` address, its own routes would answer while these returned 403.
+- The `Origin` check compares the full authority, matching upstream. A browser that ever sends a port-less loopback `Origin` (reported, not standardised) would be refused by both fences — this plugin does not relax it unilaterally, and `tests/trust-fence.spec.ts` pins the current behaviour so a change is deliberate rather than incidental.
 - An **at-most-once latch** rejects duplicate transitions (a concurrent second POST gets `409`).
 - The model tool's `delayMs` is **floored at 1000 ms** — the model cannot kill the process before its own turn settles.
 - The restart marker is **consumed (deleted) on boot**, so a later ordinary launch never misreports a restart.

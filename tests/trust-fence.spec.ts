@@ -78,8 +78,38 @@ describe('trust fence: Origin', () => {
     // HTTP). If upstream ever tightens this, this test is the drift signal.
     expect(isTrustedPowerRequest(req('127.0.0.1', { ...GOOD_HOST, origin: 'https://127.0.0.1:3080' }))).toBe(true)
   })
+  it('denies a port-less loopback Origin, which is a known upstream compatibility gap', () => {
+    // A page served from http://127.0.0.1:3080 should send
+    // `Origin: http://127.0.0.1:3080`; the port is omitted only for a scheme's
+    // default port. There are reports of a browser sending the port-less form
+    // for a non-default port, which this fence — and the official
+    // `isTrustedApiRequest`, which compares the same authority — both refuse.
+    //
+    // This test pins the CURRENT behaviour on purpose rather than endorsing it.
+    // Relaxing a destructive endpoint's Origin check to hostname-only is not a
+    // change to make unilaterally: the fence deliberately follows upstream's
+    // rule, so the fix belongs there and this test is the signal to sync when
+    // it lands. Failing here means someone changed the rule — make that
+    // deliberate.
+    expect(isTrustedPowerRequest(req('127.0.0.1', { ...GOOD_HOST, 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1' }))).toBe(false)
+  })
+
   it('denies the "null" origin and unparseable values', () => {
     expect(isTrustedPowerRequest(req('127.0.0.1', { ...GOOD_HOST, origin: 'null' }))).toBe(false)
     expect(isTrustedPowerRequest(req('127.0.0.1', { ...GOOD_HOST, origin: 'garbage' }))).toBe(false)
+  })
+})
+
+describe('trust fence: deliberate divergence from the official loopback set', () => {
+  it('accepts only 127.0.0.1, not the whole of 127/8 the official helper accepts', () => {
+    // dsh-client-connection's `isLoopbackHostname` accepts any 127/8 address
+    // (`127.0.0.2` included). This fence does not. It is strictly narrower, so
+    // it cannot admit anything the official fence would refuse — but it means
+    // that if DSH ever serves on another 127/8 address, the official /api
+    // routes would answer while these endpoints returned 403. Pinned here so
+    // that widening it is a visible, deliberate edit.
+    for (const host of ['127.0.0.2:3080', '127.1.2.3:3080']) {
+      expect(isTrustedPowerRequest(req('127.0.0.1', { host })), host).toBe(false)
+    }
   })
 })
