@@ -86,9 +86,10 @@ click power → menu → Restart
 [helper]  wait for the old PID to exit (bounded by the host's own budget)
           → wait for the port to free
           → wait for session logs to stop growing (quiescence)
-          → write the v2 marker, then spawn DSH with the same execPath/argv/cwd
-            and a DSH_POWER_RESTART_ID launch token. A `--port 0` command line
-            is rewritten to the port this process actually bound, so the
+          → write the v2 marker, then spawn DSH with the same invocation
+            and cwd, plus a DSH_POWER_RESTART_ID launch token. A `--port 0`
+            command line is rewritten to the port this process actually bound,
+            so the
             successor lands on the port the helper is waiting for
           → poll /health until ok && instanceId != old && restart.restartId matches
           → self-delete
