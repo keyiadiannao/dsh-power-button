@@ -13,7 +13,7 @@
 
 - **侧边栏电源按钮**:注册到页脚操作位(`sidebar.footer.action`),主题自适应,外观与旁边的"设置"按钮一致
 - **重启/关机菜单** + Windows 关机风格全屏过渡动画;重启确认后页面自动刷新
-- **自包含重启引擎**:写一个 detached 的 `.cjs` helper,经 ARM → COMMIT → ACK 握手接手拉起职责,等旧进程退出、端口释放、会话日志停止增长后,用相同的 `execPath/execArgv/argv/cwd` 重新拉起 DSH,并以 `restartId` 确认新实例。不使用 PowerShell、不使用 `taskkill`
+- **自包含重启引擎**:写一个 detached 的 `.cjs` helper,经 ARM → COMMIT → ACK 握手接手拉起职责,等旧进程退出、端口释放、会话日志停止增长后,以相同的调用方式与原目录重新拉起 DSH——若原命令行是 `--port 0`,则固定为本进程实际绑定的端口——并以 `restartId` 确认新实例。不使用 PowerShell、不使用 `taskkill`
 - **`/restart` 与 `/shutdown` 命令**、**`restart_harness` 模型工具**(与 `anweat/dsh-restart` 同名;若名字已被其它插件占用则跳过注册),以及只读的 **`restart_status`** 诊断工具
 - **界面与宿主文案本地化**(中文 / English),跟随 profile 的 `locale.preference`
 - **启动清理**:自动清理运行目录下超过 7 天的 helper 日志与脚本、每次重启的握手记录,以及尚未投递的重启通知
@@ -145,7 +145,7 @@ ARM → COMMIT → ACK 握手：没有任何进程负责拉起是 UI 唯一无�
 
 机制:
 - 启动时若消费到重启 marker,`/health` 会报告 `restarted: true, fromInstanceId: <old>`
-- `/health` 还会报告 `appExit: "available" | "missing"`——启动器提供的退出通道在当前宿主是否真的可解析。`missing` 意味着每次重启都退化为 `process.exit`(无优雅销毁);该字段把"重启卡 30 秒"变成一次请求即可确诊
+- `/health` 还会报告 `appExit: "available" | "missing"`——启动器提供的退出通道在当前宿主是否真的可解析。`missing` 意味着每次重启都退化为 `process.exit`(无优雅销毁);该字段把一次被拖慢的重启变成一次请求即可确诊,而不必等到 helper 放弃等待旧 PID 才发现
 - 客户端加载后查询一次 `/health`;若 `restarted` 为真则显示 toast,然后通过
   `POST /api/dsh-power-button/notice-shown` 确认,避免刷新后重复弹出
 - 重启通知走 DSH 官方的 inbox 机制,不直接 append 会话事件,因此重启**不会**损坏会话日志或留下未配对事件
@@ -170,7 +170,8 @@ helper 脚本(`buildRestartHelper`)**原样**作为真实进程执行,在真实 
 CI 在 Windows / Ubuntu / macOS 上运行:install、两项 typecheck、测试、build、
 "提交的 `lib/` 必须与全新构建逐字节一致"的门禁(git 安装直接跑这些产物,所以它们
 必须就是源码的产物),以及 `pnpm pack` 后校验发布 tarball 确实包含 `lib/` 与
-`cordis.patch.yml`。
+`cordis.patch.yml`。另有一个单独的 Linux job 在 **Node 22.19** 上跑同样的步骤,
+即 `engines.node` 声明的最低版本——除此之外没有任何地方会验证它。
 
 测试通过 vitest setup 文件隔离 `DSH_HOME`,不会触碰真实的 `~/.dsh`。
 产物:host 在 `lib/index.js`,client bundle 在 `lib/client.js`(均已入库,git 安装免构建)。

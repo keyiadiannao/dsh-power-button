@@ -4,6 +4,10 @@
 # processes on every OS — exactly the layer (detached processes, pid liveness,
 # port release) that unit tests and a single platform cannot prove, which is why
 # the matrix covers all three supported platforms.
+#
+# The matrix runs one Node version; `package.json` declares `>=22.19`, so a
+# second job covers that declared floor. Widening the matrix to 3 OS x 2 Node
+# would cost six jobs to re-prove what one extra job shows.
 name: CI
 
 on:
@@ -56,3 +60,25 @@ jobs:
               exit 1
             fi
           done
+
+  # `engines.node` promises >=22.19 and nothing else here runs Node 22, so the
+  # promise was unverified. One job on the declared floor is enough: the OS
+  # matrix above already covers platform behaviour.
+  compat-node22:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22.19.0
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm typecheck:tests
+      - run: pnpm test
+      - run: pnpm build
+      # The build output is not Node-version dependent, so this also proves the
+      # shipped artifacts are reproducible at the declared floor.
+      - name: committed lib/ matches a floor-version build
+        run: git diff --exit-code -- lib

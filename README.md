@@ -13,7 +13,7 @@ A self-contained **power & lifecycle controller** for [DeepSeek Harness](https:/
 
 - **Sidebar power button** in the footer action slot, theme-aware and styled to match the adjacent Settings trigger.
 - **Restart / Shutdown menu** with a Windows-style full-screen transition overlay; the page auto-reloads after a confirmed restart.
-- **Self-contained restart engine**: writes a detached `.cjs` helper that takes over relaunching DSH through an ARM → COMMIT → ACK handshake, waits for the old process to exit, the port to free, and the session logs to stop growing, then relaunches with the same `execPath/execArgv/argv/cwd` and confirms the new instance by `restartId`. No PowerShell, no `taskkill`.
+- **Self-contained restart engine**: writes a detached `.cjs` helper that takes over relaunching DSH through an ARM → COMMIT → ACK handshake, waits for the old process to exit, the port to free, and the session logs to stop growing, then relaunches with the same invocation and cwd — an ephemeral `--port 0` is pinned to the port this process actually bound — and confirms the new instance by `restartId`. No PowerShell, no `taskkill`.
 - **`/restart` and `/shutdown` commands**, a **`restart_harness` model tool** (same name as `anweat/dsh-restart`; registration is skipped when another plugin already owns the name), and a read-only **`restart_status`** tool for checking whether a restart happened.
 - **Localized UI and host notices** (zh / en), following the profile's `locale.preference`.
 - **Startup housekeeping**: helper logs and scripts, per-restart handshake records, and undelivered restart notices older than 7 days are pruned from the runtime directory.
@@ -175,7 +175,8 @@ Mechanics:
 - `/health` also reports `appExit: "available" | "missing"` — whether the
   launcher-provided exit channel actually resolves in this host. `missing`
   means every restart falls back to `process.exit` (no graceful disposal), so
-  the field turns a 30s restart stall into a one-request diagnosis.
+  the field turns a delayed restart into a one-request diagnosis instead of
+  something only noticed once the helper gives up on the old pid.
 - The client checks `/health` once after load; when `restarted` is true it
   shows the toast, then ACKs via `POST /api/dsh-power-button/notice-shown`
   so a later refresh does not re-show it.
@@ -197,6 +198,8 @@ CI runs on Windows, Ubuntu and macOS: install, both typechecks, tests, build, a
 gate that the committed `lib/` matches a fresh build byte for byte (a git install
 runs those artifacts, so they must be what the source produces), and a `pnpm pack`
 check that the published tarball actually contains `lib/` and `cordis.patch.yml`.
+A separate Linux job runs the same steps on Node **22.19**, the floor
+`engines.node` declares — nothing else here would otherwise exercise it.
 
 `tests/restart-runtime.spec.ts` is a process-level acceptance suite: it
 executes the EXACT helper script the host generates (`buildRestartHelper`) as
