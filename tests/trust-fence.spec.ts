@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isTrustedPowerRequest } from '../src/index.ts'
+import { explainPowerRequestTrust, isTrustedPowerRequest } from '../src/index.ts'
 
 // Regression matrix for the destructive-POST trust fence. This fence is
 // self-maintained — `/api/dsh-power-button/*` is longer than the official
@@ -111,5 +111,57 @@ describe('trust fence: deliberate divergence from the official loopback set', ()
     for (const host of ['127.0.0.2:3080', '127.1.2.3:3080']) {
       expect(isTrustedPowerRequest(req('127.0.0.1', { host })), host).toBe(false)
     }
+  })
+
+  it('has no trustedHosts equivalent, so a LAN authority DSH accepts is refused here', () => {
+    // The official fence takes `trustedHosts`: non-loopback authorities a
+    // deployment serves, which is how DSH supports LAN/IP serving. This fence
+    // has no such concept, and additionally requires a loopback socket — which
+    // the official fence never checks. Both mean a deployment that works for
+    // DSH's own /api can still get 403 from these endpoints. Pinned so that
+    // adding the equivalent is a deliberate decision, not a silent widening.
+    expect(isTrustedPowerRequest(req('127.0.0.1', { host: 'harness.internal:3080' }))).toBe(false)
+    expect(isTrustedPowerRequest(req('192.168.1.10', { host: '192.168.1.10:3080' }))).toBe(false)
+  })
+})
+
+describe('trust fence: a refusal names the rule that refused', () => {
+  // The first reported failure of this fence arrived as an issue with an empty
+  // body: the caller could see only "forbidden", so there was nothing to
+  // report. Each rule now names itself in the 403.
+  const reasonOf = (request: Parameters<typeof explainPowerRequestTrust>[0]): string => {
+    const verdict = explainPowerRequestTrust(request)
+    return verdict.trusted ? 'trusted' : verdict.reason
+  }
+
+  it('names the socket rule', () => {
+    expect(reasonOf(req('192.168.1.10', GOOD_HOST))).toBe('socket-not-loopback')
+    expect(reasonOf(req(undefined, GOOD_HOST))).toBe('socket-not-loopback')
+  })
+
+  it('names the Host rules', () => {
+    expect(reasonOf(req('127.0.0.1', {}))).toBe('host-missing')
+    expect(reasonOf(req('127.0.0.1', { host: 'not a url' }))).toBe('host-unparseable')
+    expect(reasonOf(req('127.0.0.1', { host: 'evil.com' }))).toBe('host-untrusted')
+    expect(reasonOf(req('127.0.0.1', { host: '127.0.0.2:3080' }))).toBe('host-untrusted')
+  })
+
+  it('names the cross-site rule', () => {
+    expect(reasonOf(req('127.0.0.1', { ...GOOD_HOST, 'sec-fetch-site': 'cross-site' }))).toBe('cross-site')
+  })
+
+  it('names the Origin rules', () => {
+    expect(reasonOf(req('127.0.0.1', { ...GOOD_HOST, origin: 'null' }))).toBe('origin-null')
+    expect(reasonOf(req('127.0.0.1', { ...GOOD_HOST, origin: 'garbage' }))).toBe('origin-mismatch')
+    expect(reasonOf(req('127.0.0.1', { ...GOOD_HOST, origin: 'http://127.0.0.1:9999' }))).toBe('origin-mismatch')
+    // The reported browser behaviour: Host has a port, Origin does not.
+    expect(reasonOf(req('127.0.0.1', { ...GOOD_HOST, origin: 'http://127.0.0.1' }))).toBe('origin-mismatch')
+  })
+
+  it('reports trust, not a reason, when every rule passes', () => {
+    expect(explainPowerRequestTrust(req('127.0.0.1', { ...GOOD_HOST, origin: 'http://127.0.0.1:3080' })))
+      .toEqual({ trusted: true })
+    expect(explainPowerRequestTrust(req('::1', { host: 'localhost:3080', 'sec-fetch-site': 'same-origin' })))
+      .toEqual({ trusted: true })
   })
 })

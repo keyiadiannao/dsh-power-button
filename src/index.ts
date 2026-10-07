@@ -1397,33 +1397,109 @@ export function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | 
  * route), so a matrix test is what keeps it from silently drifting when the
  * upstream fence evolves.
  */
-export function isTrustedPowerRequest(req: {
+
+/** Which rule refused a destructive request. Stable codes: they are reported
+ * to the caller and logged, so a user can say what happened instead of
+ * reporting an opaque 403. */
+export type PowerTrustRejectReason =
+  | 'socket-not-loopback'
+  | 'host-missing'
+  | 'host-unparseable'
+  | 'host-untrusted'
+  | 'cross-site'
+  | 'origin-null'
+  | 'origin-mismatch'
+
+/** The loopback hostnames this fence accepts, matching upstream. */
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
+
+/**
+ * Decide trust and say which rule decided it.
+ *
+ * The reason exists because a bare "forbidden" is not actionable: the first
+ * reported failure of this fence arrived as an empty issue, since the caller
+ * could see nothing but the refusal. The rule name is what makes the report
+ * usable.
+ * @param req - the incoming request's socket address and headers.
+ * @returns `{ trusted: true }`, or `{ trusted: false, reason }` naming the rule.
+ */
+export function explainPowerRequestTrust(req: {
   socket?: { remoteAddress?: string | undefined } | undefined
   headers: Record<string, unknown>
-}): boolean {
+}): { trusted: true } | { trusted: false, reason: PowerTrustRejectReason } {
   const address = req.socket?.remoteAddress
-  if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') return false
+  if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') {
+    return { trusted: false, reason: 'socket-not-loopback' }
+  }
   const { host, origin, 'sec-fetch-site': secFetchSite } = req.headers
   // Host fence: Host must be a loopback authority (we only serve loopback).
-  if (typeof host !== 'string') return false
+  if (typeof host !== 'string') return { trusted: false, reason: 'host-missing' }
   let hostUrl: URL
   try {
     hostUrl = new URL(`http://${host}`)
   } catch {
-    return false
+    return { trusted: false, reason: 'host-unparseable' }
   }
-  const hn = hostUrl.hostname
-  if (hn !== '127.0.0.1' && hn !== '::1' && hn !== '[::1]' && hn !== 'localhost') return false
+  if (!LOOPBACK_HOSTNAMES.has(hostUrl.hostname)) return { trusted: false, reason: 'host-untrusted' }
   // Cross-site fence.
-  if (typeof secFetchSite === 'string' && secFetchSite === 'cross-site') return false
+  if (typeof secFetchSite === 'string' && secFetchSite === 'cross-site') {
+    return { trusted: false, reason: 'cross-site' }
+  }
   // Origin fence: present Origin must equal Host; "null" origin refused.
-  if (origin === undefined) return true
-  if (typeof origin !== 'string' || origin === 'null') return false
+  if (origin === undefined) return { trusted: true }
+  if (typeof origin !== 'string' || origin === 'null') return { trusted: false, reason: 'origin-null' }
   try {
     return new URL(origin).host === hostUrl.host
+      ? { trusted: true }
+      : { trusted: false, reason: 'origin-mismatch' }
   } catch {
-    return false
+    return { trusted: false, reason: 'origin-mismatch' }
   }
+}
+
+/**
+ * Whether a destructive POST may proceed. The boolean the rest of the plugin
+ * branches on; {@link explainPowerRequestTrust} carries the diagnosis.
+ * @param req - the incoming request's socket address and headers.
+ * @returns true when every trust rule passes.
+ */
+export function isTrustedPowerRequest(req: {
+  socket?: { remoteAddress?: string | undefined } | undefined
+  headers: Record<string, unknown>
+}): boolean {
+  return explainPowerRequestTrust(req).trusted
+}
+
+/**
+ * One-line explanation per refusal, returned with the 403. These describe this
+ * plugin's own policy, never the caller's data, so a refused cross-origin page
+ * learns nothing it could not read in this MIT-licensed source.
+ */
+const TRUST_REJECT_HINTS: Record<PowerTrustRejectReason, string> = {
+  'socket-not-loopback':
+    'The request did not arrive over the loopback interface. This plugin refuses anything else, even where DSH itself accepts it (a LAN address or a port forward, for example).',
+  'host-missing': 'The request carried no Host header.',
+  'host-unparseable': 'The Host header is not a valid authority.',
+  'host-untrusted':
+    'The Host names an authority this plugin does not serve. It accepts 127.0.0.1, ::1 and localhost only — narrower than DSH, which also accepts the rest of 127/8 and any configured trustedHosts.',
+  'cross-site': 'The browser marked the request sec-fetch-site: cross-site.',
+  'origin-null': 'The Origin header is null or unparseable (sandboxed iframe, file: page).',
+  'origin-mismatch':
+    "The Origin does not equal the Host authority. If the Host carries a port and the Origin does not, that is a reported browser behaviour; this fence follows DSH's own rule and refuses it.",
+}
+
+/**
+ * Render a caller-supplied header value for a line-oriented log.
+ *
+ * Header values reach this plugin from whoever sent the request, so control
+ * characters are stripped — otherwise a crafted Host could forge extra log
+ * lines — and the result is capped.
+ * @param value - the raw header value, or anything else.
+ * @returns a single safe token, or `<absent>`.
+ */
+function logSafe(value: unknown): string {
+  if (typeof value !== 'string') return '<absent>'
+  return value.replace(/[\u0000-\u001f\u007f]/g, '?').slice(0, 120)
 }
 
 /**
@@ -1497,8 +1573,26 @@ export function apply(ctx: any, config: Config) {
       const sub = url.pathname.slice(BASE.length).replace(/\/+$/, '') || '/'
       // Every mutation POST goes through the same-origin guard; health stays open.
       const needsGuard = (sub === '/restart' || sub === '/shutdown' || sub === '/notice-shown') && req.method === 'POST'
-      if (needsGuard && !isTrustedPowerRequest(req)) {
-        return json(res, 403, { ok: false, error: 'forbidden: cross-origin power request' })
+      if (needsGuard) {
+        const verdict = explainPowerRequestTrust(req)
+        if (!verdict.trusted) {
+          // The observed facts go to the local log, not back to a caller the
+          // fence just refused. Header values are caller-controlled, so they
+          // are stripped of control characters and capped before they reach a
+          // line-oriented log.
+          try {
+            appendLog(LOG_FILE, `${new Date().toISOString()} refused ${req.method} ${sub}: ${verdict.reason}`
+              + ` host=${logSafe(req.headers.host)} origin=${logSafe(req.headers.origin)}`
+              + ` sec-fetch-site=${logSafe(req.headers['sec-fetch-site'])}`
+              + ` remote=${logSafe(req.socket?.remoteAddress)}\n`)
+          } catch { /* ignore */ }
+          return json(res, 403, {
+            ok: false,
+            error: 'forbidden: cross-origin power request',
+            reason: verdict.reason,
+            hint: TRUST_REJECT_HINTS[verdict.reason],
+          })
+        }
       }
       try {
         if (sub === '/restart' && req.method === 'POST') {

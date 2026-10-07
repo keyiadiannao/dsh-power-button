@@ -362,6 +362,37 @@ declare function shutdownDsh(ctx: any, res: import('node:http').ServerResponse |
  * route), so a matrix test is what keeps it from silently drifting when the
  * upstream fence evolves.
  */
+/** Which rule refused a destructive request. Stable codes: they are reported
+ * to the caller and logged, so a user can say what happened instead of
+ * reporting an opaque 403. */
+type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unparseable' | 'host-untrusted' | 'cross-site' | 'origin-null' | 'origin-mismatch';
+/**
+ * Decide trust and say which rule decided it.
+ *
+ * The reason exists because a bare "forbidden" is not actionable: the first
+ * reported failure of this fence arrived as an empty issue, since the caller
+ * could see nothing but the refusal. The rule name is what makes the report
+ * usable.
+ * @param req - the incoming request's socket address and headers.
+ * @returns `{ trusted: true }`, or `{ trusted: false, reason }` naming the rule.
+ */
+declare function explainPowerRequestTrust(req: {
+  socket?: {
+    remoteAddress?: string | undefined;
+  } | undefined;
+  headers: Record<string, unknown>;
+}): {
+  trusted: true;
+} | {
+  trusted: false;
+  reason: PowerTrustRejectReason;
+};
+/**
+ * Whether a destructive POST may proceed. The boolean the rest of the plugin
+ * branches on; {@link explainPowerRequestTrust} carries the diagnosis.
+ * @param req - the incoming request's socket address and headers.
+ * @returns true when every trust rule passes.
+ */
 declare function isTrustedPowerRequest(req: {
   socket?: {
     remoteAddress?: string | undefined;
@@ -370,4 +401,4 @@ declare function isTrustedPowerRequest(req: {
 }): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
