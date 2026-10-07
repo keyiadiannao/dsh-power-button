@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { declaredTrustedHosts, explainPowerRequestTrust, isTrustedPowerRequest } from '../src/index.ts'
+import { boundHostOf, declaredTrustedHosts, explainPowerRequestTrust, isTrustedPowerRequest } from '../src/index.ts'
 
 // Regression matrix for the destructive-POST trust fence. This fence is
 // self-maintained — `/api/dsh-power-button/*` is longer than the official
@@ -229,5 +229,51 @@ describe('declaredTrustedHosts', () => {
     expect(declaredTrustedHosts({ get: () => undefined })).toEqual([])
     expect(declaredTrustedHosts({})).toEqual([])
     expect(declaredTrustedHosts({ get: () => ({ trustedHosts: 'nope' }) })).toEqual([])
+  })
+})
+
+describe('trust fence: the socket rule follows what the server is bound to', () => {
+  // Bound to 127.0.0.1 the server listens nowhere else, so a non-loopback peer
+  // cannot be an off-box client reaching it directly — it is a local forwarding
+  // layer (WSL's localhost bridge, a container port map, a tunnel) whose address
+  // in this namespace is what arrives. Refusing that broke setups every other
+  // DSH route serves. Bound to 0.0.0.0 an off-box peer is real, and there the
+  // rule is what stops a forged loopback Host.
+  const OFFBOX = req('192.168.1.10', GOOD_HOST)
+
+  it('accepts a non-loopback peer for a loopback Host when bound to 127.0.0.1', () => {
+    expect(explainPowerRequestTrust(OFFBOX, [], '127.0.0.1')).toEqual({ trusted: true })
+    expect(explainPowerRequestTrust(req('172.17.0.1', { ...GOOD_HOST, origin: 'http://127.0.0.1:3080' }), [], '127.0.0.1'))
+      .toEqual({ trusted: true })
+  })
+
+  it('still refuses that peer when bound to every interface', () => {
+    expect(explainPowerRequestTrust(OFFBOX, [], '0.0.0.0'))
+      .toEqual({ trusted: false, reason: 'socket-not-loopback' })
+  })
+
+  it('defaults to the exposed binding, so an omitted argument stays strict', () => {
+    expect(explainPowerRequestTrust(OFFBOX)).toEqual({ trusted: false, reason: 'socket-not-loopback' })
+  })
+
+  it('keeps the Host fence either way', () => {
+    // Relaxing the socket rule for a loopback binding must not license a Host we
+    // do not serve — the rebinding defense is independent of the binding.
+    expect(explainPowerRequestTrust(req('192.168.1.10', { host: 'evil.com:3080' }), [], '127.0.0.1'))
+      .toEqual({ trusted: false, reason: 'host-untrusted' })
+  })
+})
+
+describe('boundHostOf', () => {
+  it('reads the host\u2019s own web server binding', () => {
+    expect(boundHostOf({ webServer: { host: '127.0.0.1' } })).toBe('127.0.0.1')
+    expect(boundHostOf({ webServer: { host: '0.0.0.0' } })).toBe('0.0.0.0')
+  })
+
+  it('falls back to the exposed binding when it cannot be read', () => {
+    // An unreadable binding must keep the strict rule, not silently relax it.
+    expect(boundHostOf({})).toBe('0.0.0.0')
+    expect(boundHostOf({ webServer: {} })).toBe('0.0.0.0')
+    expect(boundHostOf({ webServer: { host: 'something-else' } })).toBe('0.0.0.0')
   })
 })

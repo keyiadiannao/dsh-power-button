@@ -349,10 +349,10 @@ type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unp
  *   - Which hostnames count as loopback. The official `isLoopbackHostname`
  *     accepts the whole of 127/8 (`127.0.0.2` included); this accepts only
  *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost.
- *   - The loopback-socket rule is kept for loopback authorities, where the
- *     official fence never looks at the socket at all. It is inert while DSH
- *     binds 127.0.0.1 only, and it is what keeps a forged loopback `Host` from
- *     reaching these endpoints if that ever changes.
+ *   - The loopback-socket rule is applied only while the server is bound to
+ *     every interface, where an off-box peer is possible and a forged loopback
+ *     `Host` would otherwise get through. The official fence never looks at the
+ *     socket at all.
  * The authorities the operator declares with `--trusted-host` are honoured, read
  * from the host's own `webStartup` values: an authority DSH serves must not be
  * refused here for not being loopback. The loopback-socket rule is skipped for
@@ -381,7 +381,7 @@ declare function explainPowerRequestTrust(req: {
     remoteAddress?: string | undefined;
   } | undefined;
   headers: Record<string, unknown>;
-}, trustedHosts?: readonly string[]): {
+}, trustedHosts?: readonly string[], boundHost?: '127.0.0.1' | '0.0.0.0'): {
   trusted: true;
 } | {
   trusted: false;
@@ -397,6 +397,9 @@ declare function declaredTrustedHosts(ctx: any): readonly string[];
  * @param req - the incoming request's socket address and headers.
  * @param trustedHosts - the host's declared authorities, from
  * {@link declaredTrustedHosts}.
+ * @param boundHost - the address the server listens on, from
+ * {@link boundHostOf}; defaults to the exposed value so a caller that omits it
+ * keeps the strict check.
  * @returns true when every trust rule passes.
  */
 declare function isTrustedPowerRequest(req: {
@@ -404,7 +407,11 @@ declare function isTrustedPowerRequest(req: {
     remoteAddress?: string | undefined;
   } | undefined;
   headers: Record<string, unknown>;
-}, trustedHosts?: readonly string[]): boolean;
+}, trustedHosts?: readonly string[], boundHost?: '127.0.0.1' | '0.0.0.0'): boolean;
+/** The address this server listens on, from the host's own web server service.
+ * Defaults to the exposed value when it cannot be read, so an unreadable host
+ * keeps the strict socket rule rather than silently relaxing it. */
+declare function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0';
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };

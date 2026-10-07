@@ -1395,10 +1395,10 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
  *   - Which hostnames count as loopback. The official `isLoopbackHostname`
  *     accepts the whole of 127/8 (`127.0.0.2` included); this accepts only
  *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost.
- *   - The loopback-socket rule is kept for loopback authorities, where the
- *     official fence never looks at the socket at all. It is inert while DSH
- *     binds 127.0.0.1 only, and it is what keeps a forged loopback `Host` from
- *     reaching these endpoints if that ever changes.
+ *   - The loopback-socket rule is applied only while the server is bound to
+ *     every interface, where an off-box peer is possible and a forged loopback
+ *     `Host` would otherwise get through. The official fence never looks at the
+ *     socket at all.
  * The authorities the operator declares with `--trusted-host` are honoured, read
  * from the host's own `webStartup` values: an authority DSH serves must not be
  * refused here for not being loopback. The loopback-socket rule is skipped for
@@ -1428,6 +1428,7 @@ export function explainPowerRequestTrust(
     headers: Record<string, unknown>
   },
   trustedHosts: readonly string[] = [],
+  boundHost: '127.0.0.1' | '0.0.0.0' = '0.0.0.0',
 ): { trusted: true } | { trusted: false, reason: PowerTrustRejectReason } {
   const { host, origin, 'sec-fetch-site': secFetchSite } = req.headers
   // Host fence first: which authority the browser believes it is talking to is
@@ -1448,17 +1449,18 @@ export function explainPowerRequestTrust(
   // A loopback authority is only reachable from this machine, so a request for
   // one that arrives over another interface did not come from this machine.
   //
-  // This reads as unreachable today, and is worth keeping anyway: DSH refuses
-  // to bind anything but 127.0.0.1 ("--host 0.0.0.0 is intentionally not
-  // supported yet for safety: it would expose remote code execution to the
-  // network"), so every connection currently arrives over loopback. The rule is
-  // the guard for the day that changes — with the server bound off-loopback, a
-  // client on the network could otherwise forge `Host: 127.0.0.1:3080`, pass the
-  // Host fence, send no Origin (not a browser), and reach these endpoints.
+  // That holds only while the server is bound to every interface. A server bound
+  // to 127.0.0.1 is not listening anywhere else, so a non-loopback peer cannot
+  // be an off-box client reaching it directly: it is a local forwarding layer
+  // (WSL's localhost bridge, a container port map, a tunnel) whose own address in
+  // this namespace is what we see. Refusing those breaks setups that work for
+  // every other DSH route, and protects nothing the binding does not already
+  // protect — so the rule is applied exactly when the binding makes an off-box
+  // peer possible, which is also when a forged loopback Host would matter.
   //
-  // A declared authority is the opposite case: the operator has said this
-  // server answers to it from elsewhere, where a loopback socket is impossible.
-  if (loopbackHost) {
+  // A declared authority is the third case: the operator has said this server
+  // answers to it from elsewhere, where a loopback socket is impossible.
+  if (loopbackHost && boundHost === '0.0.0.0') {
     const address = req.socket?.remoteAddress
     if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') {
       return { trusted: false, reason: 'socket-not-loopback' }
@@ -1531,6 +1533,9 @@ export function declaredTrustedHosts(ctx: any): readonly string[] {
  * @param req - the incoming request's socket address and headers.
  * @param trustedHosts - the host's declared authorities, from
  * {@link declaredTrustedHosts}.
+ * @param boundHost - the address the server listens on, from
+ * {@link boundHostOf}; defaults to the exposed value so a caller that omits it
+ * keeps the strict check.
  * @returns true when every trust rule passes.
  */
 export function isTrustedPowerRequest(
@@ -1539,8 +1544,16 @@ export function isTrustedPowerRequest(
     headers: Record<string, unknown>
   },
   trustedHosts: readonly string[] = [],
+  boundHost: '127.0.0.1' | '0.0.0.0' = '0.0.0.0',
 ): boolean {
-  return explainPowerRequestTrust(req, trustedHosts).trusted
+  return explainPowerRequestTrust(req, trustedHosts, boundHost).trusted
+}
+
+/** The address this server listens on, from the host's own web server service.
+ * Defaults to the exposed value when it cannot be read, so an unreadable host
+ * keeps the strict socket rule rather than silently relaxing it. */
+export function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0' {
+  return ctx?.webServer?.host === '127.0.0.1' ? '127.0.0.1' : '0.0.0.0'
 }
 
 /**
@@ -1648,8 +1661,10 @@ export function apply(ctx: any, config: Config) {
       const needsGuard = (sub === '/restart' || sub === '/shutdown' || sub === '/notice-shown') && req.method === 'POST'
       if (needsGuard) {
         // The host's own `--trusted-host` declarations, so an authority DSH
-        // serves is not refused here just because it is not loopback.
-        const verdict = explainPowerRequestTrust(req, declaredTrustedHosts(ctx))
+        // serves is not refused here just because it is not loopback; and the
+        // address it actually listens on, which decides whether an off-box peer
+        // is even possible for a loopback authority.
+        const verdict = explainPowerRequestTrust(req, declaredTrustedHosts(ctx), boundHostOf(ctx))
         if (!verdict.trusted) {
           // The observed facts go to the local log, not back to a caller the
           // fence just refused. Header values are caller-controlled, so they
