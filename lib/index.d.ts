@@ -349,15 +349,15 @@ type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unp
  *   - Which hostnames count as loopback. The official `isLoopbackHostname`
  *     accepts the whole of 127/8 (`127.0.0.2` included); this accepts only
  *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost.
- *   - The rules are reimplemented rather than imported, because the client
- *     connection package is a client-side dependency this host plugin does not
- *     take. That also means this fence has no `trustedHosts` equivalent and
- *     requires a loopback socket, where the official fence checks neither — so
- *     a deployment DSH serves over a LAN authority works for its own `/api` and
- *     still gets 403 here.
- * An upstream change to either rule does not reach this fence by itself: the
- * security regression suite pins the current behaviour, so aligning is a
- * deliberate edit rather than something that happens by drift.
+ *   - The loopback-socket rule is kept for loopback authorities, where the
+ *     official fence never looks at the socket at all.
+ * The authorities the operator declares with `--trusted-host` are honoured, read
+ * from the host's own `webStartup` values: an authority DSH serves must not be
+ * refused here for not being loopback. The loopback-socket rule is skipped for
+ * those, because a declared off-box authority is reached from off-box by
+ * definition. An upstream change to either rule does not reach this fence by
+ * itself: the security regression suite pins the current behaviour, so aligning
+ * is a deliberate edit rather than something that happens by drift.
  *
  * NOTE: our `/api/dsh-power-button/*` prefix is LONGER than the official
  * `/api` route, so webServer's longest-prefix-wins matching means these
@@ -379,16 +379,22 @@ declare function explainPowerRequestTrust(req: {
     remoteAddress?: string | undefined;
   } | undefined;
   headers: Record<string, unknown>;
-}): {
+}, trustedHosts?: readonly string[]): {
   trusted: true;
 } | {
   trusted: false;
   reason: PowerTrustRejectReason;
 };
+/** Authorities the host declared it serves, read from its own startup values.
+ * Read through `ctx.get` because `webStartup` is provided by the web bundle: a
+ * profile without it must not block this plugin from loading. */
+declare function declaredTrustedHosts(ctx: any): readonly string[];
 /**
  * Whether a destructive POST may proceed. The boolean the rest of the plugin
  * branches on; {@link explainPowerRequestTrust} carries the diagnosis.
  * @param req - the incoming request's socket address and headers.
+ * @param trustedHosts - the host's declared authorities, from
+ * {@link declaredTrustedHosts}.
  * @returns true when every trust rule passes.
  */
 declare function isTrustedPowerRequest(req: {
@@ -396,7 +402,7 @@ declare function isTrustedPowerRequest(req: {
     remoteAddress?: string | undefined;
   } | undefined;
   headers: Record<string, unknown>;
-}): boolean;
+}, trustedHosts?: readonly string[]): boolean;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };

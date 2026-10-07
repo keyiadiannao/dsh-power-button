@@ -106,9 +106,10 @@ ARM → COMMIT → ACK 握手：没有任何进程负责拉起是 UI 唯一无�
 
 ## 安全
 
-- 破坏性 POST 带 **同源/loopback 防护**(CSRF):socket 必须是 loopback、`Host` 必须是 loopback 权威、浏览器 `Origin` 必须匹配。`/api/dsh-power-button/*` 比官方 `/api` 路由更长,因此最长前缀匹配**不会**把这些请求交给 DSH 自己的 trust fence——这道防护是它们唯一的防线
-- 该防护采用与 DSH 官方 fence **相同的规则**,但有一处**刻意更窄**:只接受 `127.0.0.1`、`::1`、`localhost` 作为 loopback,而官方 helper 接受整个 `127/8`。更窄不会放进任何官方会拒绝的请求;代价是若 DSH 将来监听别的 `127/8` 地址,它自己的路由会正常响应而这些端点会返回 403
+- 破坏性 POST 带 **同源/loopback 防护**(CSRF):`Host` 必须是本部署提供服务的权威、loopback 权威还要求 socket 也是 loopback、浏览器 `Origin` 必须匹配。`/api/dsh-power-button/*` 比官方 `/api` 路由更长,因此最长前缀匹配**不会**把这些请求交给 DSH 自己的 trust fence——这道防护是它们唯一的防线
+- 它采用与 DSH 官方 fence **相同的规则**,包括你用 **`--trusted-host`** 声明的权威:这些直接从宿主自己的 `webStartup` 取值,因此 DSH 提供服务的权威**不会**因为不是 loopback 就在这里被拒。仍有两处更窄,且都只会拒绝:loopback 主机名只接受 `127.0.0.1`、`::1`、`localhost`(官方接受整个 `127/8`);以及对 loopback 权威仍保留 socket 必须是 loopback 这一条(官方 fence 完全不检查)
 - `Origin` 比较的是完整 authority,与上游一致。若浏览器真的发出不带端口的 loopback `Origin`(有报告,但并非标准),两个 fence 都会拒绝——本插件不会单方面放宽,`tests/trust-fence.spec.ts` 固定了当前行为,使改动必须是刻意的而非漂移出来的
+- 被拒时会返回稳定的 `reason` 码(`host-untrusted`、`origin-mismatch` 等),并把观测到的 `Host`/`Origin`/`sec-fetch-site`/remote 地址写进 `~/.dsh/restart-helper-<pid>.log`。界面会显示该码并附本地化解释,因此拒绝是可报告、可定位的,而不是一句空洞的 `forbidden`
 - **at-most-once 锁**:并发重复触发会被拒绝(第二次返回 `409`)
 - 模型工具 `delayMs` **下限 1000 ms**——模型无法在自身 turn 结束前杀掉进程
 - 重启 marker 在启动时**消费即删除**,后续普通启动不会误报"重启过"

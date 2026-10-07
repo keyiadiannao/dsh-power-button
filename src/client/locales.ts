@@ -44,6 +44,16 @@ export const zh = {
   restartNoEffect: '重启未生效，请重试',
   restartTimeout: '重启超时，请手动刷新',
   shutdownNoEffect: '未检测到 DSH 进程关闭，请手动确认',
+  // errors — why the trust fence refused a destructive request. The server
+  // reports a stable reason code; the sentence is localized here so the refusal
+  // is actionable instead of a bare "forbidden".
+  trustSocketNotLoopback: '请求不是从 loopback 接口进来的。DSH 通过 LAN 地址或端口转发提供服务时会这样，本插件目前只服务 loopback。',
+  trustHostMissing: '请求没有携带 Host 头。',
+  trustHostUnparseable: 'Host 头不是合法的权威。',
+  trustHostUntrusted: 'Host 指向的权威本插件不提供服务：目前只接受 127.0.0.1、::1 和 localhost，比 DSH 自身更窄。',
+  trustCrossSite: '浏览器把该请求标记为 sec-fetch-site: cross-site。',
+  trustOriginNull: 'Origin 为 null 或无法解析（沙箱 iframe、file: 页面）。',
+  trustOriginMismatch: 'Origin 与 Host 权威不相等。若 Host 带端口而 Origin 不带，属于已报告的浏览器行为。',
   retry: '重试',
   close: '关闭',
   // toast — restart complete (UI-only, never written into the session log)
@@ -90,6 +100,14 @@ export const en = {
   restartNoEffect: 'Restart did not take effect, please retry',
   restartTimeout: 'Restart timed out, please refresh manually',
   shutdownNoEffect: 'Could not confirm DSH shut down; please check manually',
+  // errors — why the trust fence refused a destructive request
+  trustSocketNotLoopback: 'The request did not arrive over the loopback interface. That happens when DSH is served through a LAN address or a port forward; this plugin currently serves loopback only.',
+  trustHostMissing: 'The request carried no Host header.',
+  trustHostUnparseable: 'The Host header is not a valid authority.',
+  trustHostUntrusted: 'The Host names an authority this plugin does not serve: it currently accepts 127.0.0.1, ::1 and localhost only, which is narrower than DSH itself.',
+  trustCrossSite: 'The browser marked the request sec-fetch-site: cross-site.',
+  trustOriginNull: 'The Origin is null or unparseable (sandboxed iframe, file: page).',
+  trustOriginMismatch: 'The Origin does not equal the Host authority. If the Host carries a port and the Origin does not, that is a reported browser behaviour.',
   retry: 'Retry',
   close: 'Close',
   // toast — restart complete (UI-only, never written into the session log)

@@ -123,6 +123,38 @@ function fail(msg: string): void {
   emit()
 }
 
+/** Locale key for each trust-fence refusal reason the server reports. */
+const TRUST_REASON_KEYS = {
+  'socket-not-loopback': 'trustSocketNotLoopback',
+  'host-missing': 'trustHostMissing',
+  'host-unparseable': 'trustHostUnparseable',
+  'host-untrusted': 'trustHostUntrusted',
+  'cross-site': 'trustCrossSite',
+  'origin-null': 'trustOriginNull',
+  'origin-mismatch': 'trustOriginMismatch',
+} as const satisfies Record<string, keyof typeof zh>
+
+/**
+ * Compose the message a failed power request shows.
+ *
+ * The trust fence answers a refusal with a stable reason code; without it the
+ * user sees only "forbidden", which is what the first reporter of this fence
+ * had to report — an issue with no content. The code is appended verbatim so it
+ * can be quoted, and the localized sentence explains it. An unknown code still
+ * shows the code rather than swallowing it: a newer server naming a rule this
+ * build does not know is exactly when the raw code matters most.
+ * @param body - the parsed response body, if any.
+ * @param status - the HTTP status, used when the body carries no message.
+ * @returns the user-facing failure text.
+ */
+function describeFailure(body: unknown, status: number): string {
+  const j = body as { error?: unknown, reason?: unknown } | null | undefined
+  const base = typeof j?.error === 'string' ? j.error : tl('opFailedHttp').replace('{0}', String(status))
+  if (typeof j?.reason !== 'string') return base
+  const key = (TRUST_REASON_KEYS as Record<string, keyof typeof zh | undefined>)[j.reason]
+  return key === undefined ? `${base} [${j.reason}]` : `${base} [${j.reason}] — ${tl(key)}`
+}
+
 /** Monotonic operation id: each beginPower() bumps it; stale timers from a
  * previous operation check it and stop. Prevents an old health poll from
  * overwriting a newer flow's phase (e.g. error → waiting on retry). */
@@ -170,7 +202,7 @@ export function beginPower(next: PowerAction): void {
         const j = await r.json().catch(() => ({}))
         if (!active()) return
         if (!r.ok || (j as { ok?: boolean })?.ok === false) {
-          fail((j as { error?: string })?.error ?? tl('opFailedHttp').replace('{0}', String(r.status)))
+          fail(describeFailure(j, r.status))
         }
       })
       .catch(() => { /* polls observe the outage */ })
@@ -247,7 +279,7 @@ export function beginPower(next: PowerAction): void {
         const j = await r.json().catch(() => ({}))
         if (!active()) return
         if (!r.ok || (j as { ok?: boolean })?.ok === false) {
-          fail((j as { error?: string })?.error ?? tl('opFailedHttp').replace('{0}', String(r.status)))
+          fail(describeFailure(j, r.status))
         }
       })
       .catch(() => { /* polls observe the outage */ })

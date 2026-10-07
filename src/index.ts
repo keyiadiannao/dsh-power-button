@@ -1395,15 +1395,15 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
  *   - Which hostnames count as loopback. The official `isLoopbackHostname`
  *     accepts the whole of 127/8 (`127.0.0.2` included); this accepts only
  *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost.
- *   - The rules are reimplemented rather than imported, because the client
- *     connection package is a client-side dependency this host plugin does not
- *     take. That also means this fence has no `trustedHosts` equivalent and
- *     requires a loopback socket, where the official fence checks neither — so
- *     a deployment DSH serves over a LAN authority works for its own `/api` and
- *     still gets 403 here.
- * An upstream change to either rule does not reach this fence by itself: the
- * security regression suite pins the current behaviour, so aligning is a
- * deliberate edit rather than something that happens by drift.
+ *   - The loopback-socket rule is kept for loopback authorities, where the
+ *     official fence never looks at the socket at all.
+ * The authorities the operator declares with `--trusted-host` are honoured, read
+ * from the host's own `webStartup` values: an authority DSH serves must not be
+ * refused here for not being loopback. The loopback-socket rule is skipped for
+ * those, because a declared off-box authority is reached from off-box by
+ * definition. An upstream change to either rule does not reach this fence by
+ * itself: the security regression suite pins the current behaviour, so aligning
+ * is a deliberate edit rather than something that happens by drift.
  *
  * NOTE: our `/api/dsh-power-button/*` prefix is LONGER than the official
  * `/api` route, so webServer's longest-prefix-wins matching means these
@@ -1420,16 +1420,18 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
  * @param req - the incoming request's socket address and headers.
  * @returns `{ trusted: true }`, or `{ trusted: false, reason }` naming the rule.
  */
-export function explainPowerRequestTrust(req: {
-  socket?: { remoteAddress?: string | undefined } | undefined
-  headers: Record<string, unknown>
-}): { trusted: true } | { trusted: false, reason: PowerTrustRejectReason } {
-  const address = req.socket?.remoteAddress
-  if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') {
-    return { trusted: false, reason: 'socket-not-loopback' }
-  }
+export function explainPowerRequestTrust(
+  req: {
+    socket?: { remoteAddress?: string | undefined } | undefined
+    headers: Record<string, unknown>
+  },
+  trustedHosts: readonly string[] = [],
+): { trusted: true } | { trusted: false, reason: PowerTrustRejectReason } {
   const { host, origin, 'sec-fetch-site': secFetchSite } = req.headers
-  // Host fence: Host must be a loopback authority (we only serve loopback).
+  // Host fence first: which authority the browser believes it is talking to is
+  // the decision the rest depends on — including whether the socket rule even
+  // applies, since a declared non-loopback authority is reached from off-box by
+  // definition.
   if (typeof host !== 'string') return { trusted: false, reason: 'host-missing' }
   let hostUrl: URL
   try {
@@ -1437,7 +1439,21 @@ export function explainPowerRequestTrust(req: {
   } catch {
     return { trusted: false, reason: 'host-unparseable' }
   }
-  if (!LOOPBACK_HOSTNAMES.has(hostUrl.hostname)) return { trusted: false, reason: 'host-untrusted' }
+  const loopbackHost = LOOPBACK_HOSTNAMES.has(hostUrl.hostname)
+  if (!loopbackHost && !matchesTrustedAuthority(hostUrl, trustedHosts)) {
+    return { trusted: false, reason: 'host-untrusted' }
+  }
+  // A loopback authority is only reachable from this machine, so a request for
+  // one that arrives over another interface is not a request from this machine.
+  // An explicitly declared authority is the opposite case: the operator has
+  // said this server answers to it from elsewhere, where a loopback socket is
+  // impossible.
+  if (loopbackHost) {
+    const address = req.socket?.remoteAddress
+    if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') {
+      return { trusted: false, reason: 'socket-not-loopback' }
+    }
+  }
   // Cross-site fence.
   if (typeof secFetchSite === 'string' && secFetchSite === 'cross-site') {
     return { trusted: false, reason: 'cross-site' }
@@ -1455,16 +1471,66 @@ export function explainPowerRequestTrust(req: {
 }
 
 /**
+ * Whether a Host authority is one the host declared it serves.
+ *
+ * The authorities come from the host's own `ctx.webStartup.trustedHosts` — the
+ * `--trusted-host` flag — so this consumes the host's decision instead of
+ * defining a second policy beside it. The matching rule is the official one: an
+ * entry with a port matches that exact authority, a port-less entry matches the
+ * hostname on any port.
+ * @param hostUrl - the parsed Host authority.
+ * @param trustedHosts - the host's declared authorities.
+ * @returns true when one entry matches.
+ */
+function matchesTrustedAuthority(hostUrl: URL, trustedHosts: readonly string[]): boolean {
+  for (const entry of trustedHosts) {
+    let entryUrl: URL
+    try {
+      entryUrl = new URL(`http://${entry}`)
+    } catch {
+      continue
+    }
+    // `new URL` strips a scheme's default port, so `host:80` parses port-less
+    // under http even though a port was written. Judging the port under the
+    // other special scheme too is what separates the two, so an explicit `:80`
+    // narrows to that authority instead of widening to every port.
+    const explicitPort = entryUrl.port !== '' ? entryUrl.port : new URL(`https://${entry}`).port
+    // The comparison then uses the parsed authority rather than a rebuilt
+    // `hostname:port` string: a Host of `host:80` normalizes its own default
+    // port away too, so only like-for-like parsing matches.
+    const matches = explicitPort === ''
+      ? entryUrl.hostname === hostUrl.hostname
+      : entryUrl.host === hostUrl.host
+    if (matches) return true
+  }
+  return false
+}
+
+/** Authorities the host declared it serves, read from its own startup values.
+ * Read through `ctx.get` because `webStartup` is provided by the web bundle: a
+ * profile without it must not block this plugin from loading. */
+export function declaredTrustedHosts(ctx: any): readonly string[] {
+  const startup = ctx?.get?.('webStartup') as { trustedHosts?: unknown } | undefined
+  const list = startup?.trustedHosts
+  return Array.isArray(list) ? list.filter((entry): entry is string => typeof entry === 'string') : []
+}
+
+/**
  * Whether a destructive POST may proceed. The boolean the rest of the plugin
  * branches on; {@link explainPowerRequestTrust} carries the diagnosis.
  * @param req - the incoming request's socket address and headers.
+ * @param trustedHosts - the host's declared authorities, from
+ * {@link declaredTrustedHosts}.
  * @returns true when every trust rule passes.
  */
-export function isTrustedPowerRequest(req: {
-  socket?: { remoteAddress?: string | undefined } | undefined
-  headers: Record<string, unknown>
-}): boolean {
-  return explainPowerRequestTrust(req).trusted
+export function isTrustedPowerRequest(
+  req: {
+    socket?: { remoteAddress?: string | undefined } | undefined
+    headers: Record<string, unknown>
+  },
+  trustedHosts: readonly string[] = [],
+): boolean {
+  return explainPowerRequestTrust(req, trustedHosts).trusted
 }
 
 /**
@@ -1474,11 +1540,11 @@ export function isTrustedPowerRequest(req: {
  */
 const TRUST_REJECT_HINTS: Record<PowerTrustRejectReason, string> = {
   'socket-not-loopback':
-    'The request did not arrive over the loopback interface. This plugin refuses anything else, even where DSH itself accepts it (a LAN address or a port forward, for example).',
+    'The request asked for a loopback authority but did not arrive over the loopback interface, so it is not a request from this machine.',
   'host-missing': 'The request carried no Host header.',
   'host-unparseable': 'The Host header is not a valid authority.',
   'host-untrusted':
-    'The Host names an authority this plugin does not serve. It accepts 127.0.0.1, ::1 and localhost only — narrower than DSH, which also accepts the rest of 127/8 and any configured trustedHosts.',
+    'The Host names an authority this plugin does not serve. It accepts 127.0.0.1, ::1 and localhost, plus any authority the host declared with --trusted-host.',
   'cross-site': 'The browser marked the request sec-fetch-site: cross-site.',
   'origin-null': 'The Origin header is null or unparseable (sandboxed iframe, file: page).',
   'origin-mismatch':
@@ -1571,7 +1637,9 @@ export function apply(ctx: any, config: Config) {
       // Every mutation POST goes through the same-origin guard; health stays open.
       const needsGuard = (sub === '/restart' || sub === '/shutdown' || sub === '/notice-shown') && req.method === 'POST'
       if (needsGuard) {
-        const verdict = explainPowerRequestTrust(req)
+        // The host's own `--trusted-host` declarations, so an authority DSH
+        // serves is not refused here just because it is not loopback.
+        const verdict = explainPowerRequestTrust(req, declaredTrustedHosts(ctx))
         if (!verdict.trusted) {
           // The observed facts go to the local log, not back to a caller the
           // fence just refused. Header values are caller-controlled, so they

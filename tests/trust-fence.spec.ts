@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { explainPowerRequestTrust, isTrustedPowerRequest } from '../src/index.ts'
+import { declaredTrustedHosts, explainPowerRequestTrust, isTrustedPowerRequest } from '../src/index.ts'
 
 // Regression matrix for the destructive-POST trust fence. This fence is
 // self-maintained — `/api/dsh-power-button/*` is longer than the official
@@ -113,13 +113,11 @@ describe('trust fence: deliberate divergence from the official loopback set', ()
     }
   })
 
-  it('has no trustedHosts equivalent, so a LAN authority DSH accepts is refused here', () => {
-    // The official fence takes `trustedHosts`: non-loopback authorities a
-    // deployment serves, which is how DSH supports LAN/IP serving. This fence
-    // has no such concept, and additionally requires a loopback socket — which
-    // the official fence never checks. Both mean a deployment that works for
-    // DSH's own /api can still get 403 from these endpoints. Pinned so that
-    // adding the equivalent is a deliberate decision, not a silent widening.
+  it('refuses a non-loopback authority that the host never declared', () => {
+    // With no declaration from the host, a non-loopback authority is refused —
+    // and the same request is accepted once the host declares it (see the
+    // --trusted-host suite below). Both halves are pinned so the widening is
+    // tied to the host's own decision rather than to a blanket relaxation.
     expect(isTrustedPowerRequest(req('127.0.0.1', { host: 'harness.internal:3080' }))).toBe(false)
     expect(isTrustedPowerRequest(req('192.168.1.10', { host: '192.168.1.10:3080' }))).toBe(false)
   })
@@ -163,5 +161,73 @@ describe('trust fence: a refusal names the rule that refused', () => {
       .toEqual({ trusted: true })
     expect(explainPowerRequestTrust(req('::1', { host: 'localhost:3080', 'sec-fetch-site': 'same-origin' })))
       .toEqual({ trusted: true })
+  })
+})
+
+describe('trust fence: authorities the host declared with --trusted-host', () => {
+  // DSH accepts an operator-declared authority for its own /api fence, so a
+  // deployment it serves over a LAN works there and used to return 403 here.
+  // These read the host's own list rather than a second policy beside it.
+  const LAN = { host: '192.168.1.5:3080' }
+
+  it('accepts a declared authority arriving over a non-loopback socket', () => {
+    // A declared LAN authority is reached from off-box by definition, so the
+    // loopback-socket rule cannot apply to it.
+    expect(explainPowerRequestTrust(req('192.168.1.10', LAN), ['192.168.1.5']))
+      .toEqual({ trusted: true })
+    expect(explainPowerRequestTrust(req('192.168.1.10', { ...LAN, origin: 'http://192.168.1.5:3080' }), ['192.168.1.5']))
+      .toEqual({ trusted: true })
+  })
+
+  it('still refuses an authority the host never declared', () => {
+    // The rebinding defense is unchanged: the Host must be one we serve, and
+    // only the operator decides which those are.
+    expect(explainPowerRequestTrust(req('127.0.0.1', { host: 'evil.com:3080' }), ['192.168.1.5']))
+      .toEqual({ trusted: false, reason: 'host-untrusted' })
+    expect(explainPowerRequestTrust(req('192.168.1.10', { host: '10.0.0.9:3080' }), ['192.168.1.5']))
+      .toEqual({ trusted: false, reason: 'host-untrusted' })
+  })
+
+  it('keeps the loopback-socket rule for loopback authorities', () => {
+    // Declaring an unrelated authority must not license a loopback Host
+    // arriving from elsewhere.
+    expect(explainPowerRequestTrust(req('192.168.1.10', GOOD_HOST), ['192.168.1.5']))
+      .toEqual({ trusted: false, reason: 'socket-not-loopback' })
+  })
+
+  it('matches a port-less entry on any port and a ported entry on that port only', () => {
+    expect(explainPowerRequestTrust(req('127.0.0.1', LAN), ['192.168.1.5']))
+      .toEqual({ trusted: true })
+    expect(explainPowerRequestTrust(req('127.0.0.1', { host: '192.168.1.5:9999' }), ['192.168.1.5:3080']))
+      .toEqual({ trusted: false, reason: 'host-untrusted' })
+  })
+
+  it('treats an explicit :80 as a port, not as port-less', () => {
+    // `new URL` strips http's default port, so `host:80` would look port-less
+    // and widen to every port. Judging it under https too is what tells them
+    // apart — an explicit :80 must narrow, not widen.
+    expect(explainPowerRequestTrust(req('127.0.0.1', { host: 'harness.internal:80' }), ['harness.internal:80']))
+      .toEqual({ trusted: true })
+    expect(explainPowerRequestTrust(req('127.0.0.1', { host: 'harness.internal:3080' }), ['harness.internal:80']))
+      .toEqual({ trusted: false, reason: 'host-untrusted' })
+  })
+
+  it('ignores malformed entries instead of trusting them', () => {
+    expect(explainPowerRequestTrust(req('192.168.1.10', LAN), ['not a url']))
+      .toEqual({ trusted: false, reason: 'host-untrusted' })
+  })
+})
+
+describe('declaredTrustedHosts', () => {
+  it('reads the host\u2019s own startup values', () => {
+    expect(declaredTrustedHosts({ get: (n: string) => (n === 'webStartup' ? { trustedHosts: ['a.internal', '10.0.0.9'] } : undefined) }))
+      .toEqual(['a.internal', '10.0.0.9'])
+  })
+
+  it('yields nothing when the profile provides no webStartup service', () => {
+    // A profile without the web bundle must not block or widen this plugin.
+    expect(declaredTrustedHosts({ get: () => undefined })).toEqual([])
+    expect(declaredTrustedHosts({})).toEqual([])
+    expect(declaredTrustedHosts({ get: () => ({ trustedHosts: 'nope' }) })).toEqual([])
   })
 })
