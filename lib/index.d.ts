@@ -320,7 +320,13 @@ declare function shutdownDsh(ctx: any, res: import('node:http').ServerResponse |
   error: string;
   note?: never;
 };
+/** Which rule refused a destructive request. Stable codes: they are reported
+ * to the caller and logged, so a user can say what happened instead of
+ * reporting an opaque 403. */
+type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unparseable' | 'host-untrusted' | 'cross-site' | 'origin-null' | 'origin-mismatch';
 /**
+ * Decide trust and say which rule decided it.
+ *
  * Trust fence for the destructive POST endpoints. These actions kill the DSH
  * process, so a malicious webpage must not trigger them cross-origin (a
  * `fetch(..., { mode: 'no-cors' })` still sends the request even though the
@@ -338,18 +344,19 @@ declare function shutdownDsh(ctx: any, res: import('node:http').ServerResponse |
  *      (normalized); absent Origin is fine (curl/non-browser — Host already
  *      bound the request).
  *
- * Two deliberate differences from the official helper. Both are narrower, so
+ * Two deliberate differences from the official helper, both narrower, so
  * neither can admit a request the official fence would refuse:
  *   - Which hostnames count as loopback. The official `isLoopbackHostname`
  *     accepts the whole of 127/8 (`127.0.0.2` included); this accepts only
- *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost. These endpoints kill the
- *     process, and the plugin only ever serves loopback, so the wider set buys
- *     nothing here.
+ *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost.
  *   - The rules are reimplemented rather than imported, because the client
  *     connection package is a client-side dependency this host plugin does not
- *     take.
+ *     take. That also means this fence has no `trustedHosts` equivalent and
+ *     requires a loopback socket, where the official fence checks neither — so
+ *     a deployment DSH serves over a LAN authority works for its own `/api` and
+ *     still gets 403 here.
  * An upstream change to either rule does not reach this fence by itself: the
- * security regression suite below pins the current behaviour, so aligning is a
+ * security regression suite pins the current behaviour, so aligning is a
  * deliberate edit rather than something that happens by drift.
  *
  * NOTE: our `/api/dsh-power-button/*` prefix is LONGER than the official
@@ -357,22 +364,13 @@ declare function shutdownDsh(ctx: any, res: import('node:http').ServerResponse |
  * requests never pass through the official fence automatically — this guard
  * is the only line of defense for them.
  *
- * Exported for the security regression suite: this fence is self-maintained
- * (a deliberate copy of the official browser-trust fence, adapted to this
- * route), so a matrix test is what keeps it from silently drifting when the
- * upstream fence evolves.
- */
-/** Which rule refused a destructive request. Stable codes: they are reported
- * to the caller and logged, so a user can say what happened instead of
- * reporting an opaque 403. */
-type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unparseable' | 'host-untrusted' | 'cross-site' | 'origin-null' | 'origin-mismatch';
-/**
- * Decide trust and say which rule decided it.
+ * Exported for the security regression suite: this fence is self-maintained, so
+ * a matrix test is what keeps it from silently drifting.
  *
  * The reason exists because a bare "forbidden" is not actionable: the first
- * reported failure of this fence arrived as an empty issue, since the caller
- * could see nothing but the refusal. The rule name is what makes the report
- * usable.
+ * reported failure of this fence arrived as an issue with an empty body, since
+ * the caller could see nothing but the refusal. The rule name is what makes a
+ * report usable.
  * @param req - the incoming request's socket address and headers.
  * @returns `{ trusted: true }`, or `{ trusted: false, reason }` naming the rule.
  */
