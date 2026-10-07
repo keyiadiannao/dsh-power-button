@@ -1396,7 +1396,9 @@ const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
  *     accepts the whole of 127/8 (`127.0.0.2` included); this accepts only
  *     127.0.0.1, ::1, ::ffff:127.0.0.1 and localhost.
  *   - The loopback-socket rule is kept for loopback authorities, where the
- *     official fence never looks at the socket at all.
+ *     official fence never looks at the socket at all. It is inert while DSH
+ *     binds 127.0.0.1 only, and it is what keeps a forged loopback `Host` from
+ *     reaching these endpoints if that ever changes.
  * The authorities the operator declares with `--trusted-host` are honoured, read
  * from the host's own `webStartup` values: an authority DSH serves must not be
  * refused here for not being loopback. The loopback-socket rule is skipped for
@@ -1444,10 +1446,18 @@ export function explainPowerRequestTrust(
     return { trusted: false, reason: 'host-untrusted' }
   }
   // A loopback authority is only reachable from this machine, so a request for
-  // one that arrives over another interface is not a request from this machine.
-  // An explicitly declared authority is the opposite case: the operator has
-  // said this server answers to it from elsewhere, where a loopback socket is
-  // impossible.
+  // one that arrives over another interface did not come from this machine.
+  //
+  // This reads as unreachable today, and is worth keeping anyway: DSH refuses
+  // to bind anything but 127.0.0.1 ("--host 0.0.0.0 is intentionally not
+  // supported yet for safety: it would expose remote code execution to the
+  // network"), so every connection currently arrives over loopback. The rule is
+  // the guard for the day that changes — with the server bound off-loopback, a
+  // client on the network could otherwise forge `Host: 127.0.0.1:3080`, pass the
+  // Host fence, send no Origin (not a browser), and reach these endpoints.
+  //
+  // A declared authority is the opposite case: the operator has said this
+  // server answers to it from elsewhere, where a loopback socket is impossible.
   if (loopbackHost) {
     const address = req.socket?.remoteAddress
     if (address !== '127.0.0.1' && address !== '::1' && address !== '::ffff:127.0.0.1') {
