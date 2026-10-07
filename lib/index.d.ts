@@ -323,7 +323,11 @@ declare function shutdownDsh(ctx: any, res: import('node:http').ServerResponse |
 /** Which rule refused a destructive request. Stable codes: they are reported
  * to the caller and logged, so a user can say what happened instead of
  * reporting an opaque 403. */
-type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unparseable' | 'host-untrusted' | 'cross-site' | 'origin-null' | 'origin-mismatch';
+type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unparseable' | 'host-untrusted' | 'cross-site' | 'origin-null' | 'origin-mismatch' |
+/** The deployment's own fence refused. Its rules are the host's, not ours. */
+'host-fence' |
+/** The deployment admitted the request; its browser authentication did not. */
+'not-authenticated';
 /**
  * Decide trust and say which rule decided it.
  *
@@ -412,6 +416,24 @@ declare function isTrustedPowerRequest(req: {
  * Defaults to the exposed value when it cannot be read, so an unreadable host
  * keeps the strict socket rule rather than silently relaxing it. */
 declare function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0';
+/**
+ * Apply the deployment's own browser-trust fence and browser authentication.
+ *
+ * This plugin's route is longer than the host's `/api` prefix, so longest-prefix
+ * matching never routes it through that fence — which is why a copy existed
+ * here at all. A copy drifts, and it refused deployments the host itself serves:
+ * the host derives LAN literals from an all-interface bind and takes declared
+ * authorities from its own configuration, neither of which a copy can see. The
+ * host publishes `requestRejection` for exactly this case, so the decision is
+ * taken from it wherever it exists.
+ * @param ctx - host context.
+ * @param req - the incoming request.
+ * @returns the status the deployment refused with, `undefined` when it admitted
+ * the request, or `null` when the host exposes no connection service.
+ */
+declare function connectionRejection(ctx: any, req: {
+  headers: Record<string, unknown>;
+}): 401 | 403 | undefined | null;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };

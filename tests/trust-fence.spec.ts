@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { boundHostOf, declaredTrustedHosts, explainPowerRequestTrust, isTrustedPowerRequest } from '../src/index.ts'
+import {
+  boundHostOf, connectionRejection, declaredTrustedHosts, explainPowerRequestTrust, isTrustedPowerRequest,
+} from '../src/index.ts'
 
 // Regression matrix for the destructive-POST trust fence. This fence is
 // self-maintained — `/api/dsh-power-button/*` is longer than the official
@@ -261,6 +263,58 @@ describe('trust fence: the socket rule follows what the server is bound to', () 
     // do not serve — the rebinding defense is independent of the binding.
     expect(explainPowerRequestTrust(req('192.168.1.10', { host: 'evil.com:3080' }), [], '127.0.0.1'))
       .toEqual({ trusted: false, reason: 'host-untrusted' })
+  })
+})
+
+describe('connectionRejection', () => {
+  // The plugin's route is longer than the host's `/api` prefix, so it never
+  // reaches the host's own fence by routing. When the host publishes
+  // `requestRejection`, its decision is the one used: it knows the authorities
+  // that exist at runtime — LAN literals derived from an all-interface bind,
+  // configured names — none of which a local copy can see.
+  const withConnection = (rejection: unknown) => ({
+    get: (n: string) => (n === 'connection' ? { requestRejection: () => rejection } : undefined),
+  })
+
+  it('passes through the host\u2019s 403 and 401', () => {
+    expect(connectionRejection(withConnection(403), { headers: {} })).toBe(403)
+    expect(connectionRejection(withConnection(401), { headers: {} })).toBe(401)
+  })
+
+  it('reports admission as undefined, not as a refusal', () => {
+    expect(connectionRejection(withConnection(undefined), { headers: {} })).toBeUndefined()
+  })
+
+  it('reports null when the host exposes no connection service, so its own fence applies', () => {
+    expect(connectionRejection({}, { headers: {} })).toBeNull()
+    expect(connectionRejection({ get: () => undefined }, { headers: {} })).toBeNull()
+    expect(connectionRejection({ get: () => ({}) }, { headers: {} })).toBeNull()
+  })
+
+  it('treats a throwing host as unavailable rather than as admitting the request', () => {
+    // Reading "it threw" as "let it through" would turn a broken host into an
+    // open destructive endpoint.
+    const throwing = { get: () => ({ requestRejection: () => { throw new Error('boom') } }) }
+    expect(connectionRejection(throwing, { headers: {} })).toBeNull()
+  })
+
+  it('does not accept an unexpected return value as admission', () => {
+    // Only `undefined` means the host admitted it; anything else is a host this
+    // build does not understand, so the local fence stays the guard.
+    expect(connectionRejection(withConnection('ok'), { headers: {} })).toBeNull()
+    expect(connectionRejection(withConnection(200), { headers: {} })).toBeNull()
+  })
+
+  it('reads through ctx.get, not the property', () => {
+    // `connection` is not an injected service here, so a property read would
+    // resolve to undefined and silently skip the host's fence.
+    let asked: string | undefined
+    const ctx = {
+      get: (n: string) => { asked = n; return { requestRejection: () => 403 } },
+      connection: { requestRejection: () => undefined },
+    }
+    expect(connectionRejection(ctx, { headers: {} })).toBe(403)
+    expect(asked).toBe('connection')
   })
 })
 

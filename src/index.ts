@@ -1366,6 +1366,10 @@ export type PowerTrustRejectReason =
   | 'cross-site'
   | 'origin-null'
   | 'origin-mismatch'
+  /** The deployment's own fence refused. Its rules are the host's, not ours. */
+  | 'host-fence'
+  /** The deployment admitted the request; its browser authentication did not. */
+  | 'not-authenticated'
 
 /** The loopback hostnames this fence accepts, matching upstream. */
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
@@ -1557,6 +1561,43 @@ export function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0' {
 }
 
 /**
+ * Apply the deployment's own browser-trust fence and browser authentication.
+ *
+ * This plugin's route is longer than the host's `/api` prefix, so longest-prefix
+ * matching never routes it through that fence — which is why a copy existed
+ * here at all. A copy drifts, and it refused deployments the host itself serves:
+ * the host derives LAN literals from an all-interface bind and takes declared
+ * authorities from its own configuration, neither of which a copy can see. The
+ * host publishes `requestRejection` for exactly this case, so the decision is
+ * taken from it wherever it exists.
+ * @param ctx - host context.
+ * @param req - the incoming request.
+ * @returns the status the deployment refused with, `undefined` when it admitted
+ * the request, or `null` when the host exposes no connection service.
+ */
+export function connectionRejection(
+  ctx: any,
+  req: { headers: Record<string, unknown> },
+): 401 | 403 | undefined | null {
+  // Read through `ctx.get`: `connection` is not one of this plugin's injected
+  // services, so a property read resolves to undefined and would silently skip
+  // the host's own fence.
+  const connection = ctx?.get?.('connection') as
+    | { requestRejection?: (request: { headers: unknown }) => unknown }
+    | undefined
+  if (typeof connection?.requestRejection !== 'function') return null
+  try {
+    const rejection: unknown = connection.requestRejection({ headers: req.headers })
+    if (rejection === 401 || rejection === 403) return rejection
+    // Anything else means the host admitted it. A host that throws is not
+    // treated as admitting: `null` falls back to this plugin's own fence.
+    return rejection === undefined ? undefined : null
+  } catch {
+    return null
+  }
+}
+
+/**
  * One-line explanation per refusal, returned with the 403. These describe this
  * plugin's own policy, never the caller's data, so a refused cross-origin page
  * learns nothing it could not read in this MIT-licensed source.
@@ -1572,6 +1613,10 @@ const TRUST_REJECT_HINTS: Record<PowerTrustRejectReason, string> = {
   'origin-null': 'The Origin header is null or unparseable (sandboxed iframe, file: page).',
   'origin-mismatch':
     "The Origin does not equal the Host authority. If the Host carries a port and the Origin does not, that is a reported browser behaviour; this fence follows DSH's own rule and refuses it.",
+  'host-fence':
+    "The deployment's own /api browser-trust fence refused this request. Which authorities it serves is its decision, not this plugin's — see the host's trustedHosts configuration or its --trusted-host flag.",
+  'not-authenticated':
+    'The deployment admitted the request but this browser is not authenticated for it. Reload the UI through its launch URL to establish a session.',
 }
 
 /**
@@ -1660,28 +1705,38 @@ export function apply(ctx: any, config: Config) {
       // Every mutation POST goes through the same-origin guard; health stays open.
       const needsGuard = (sub === '/restart' || sub === '/shutdown' || sub === '/notice-shown') && req.method === 'POST'
       if (needsGuard) {
-        // The host's own `--trusted-host` declarations, so an authority DSH
-        // serves is not refused here just because it is not loopback; and the
-        // address it actually listens on, which decides whether an off-box peer
-        // is even possible for a loopback authority.
-        const verdict = explainPowerRequestTrust(req, declaredTrustedHosts(ctx), boundHostOf(ctx))
-        if (!verdict.trusted) {
-          // The observed facts go to the local log, not back to a caller the
-          // fence just refused. Header values are caller-controlled, so they
-          // are stripped of control characters and capped before they reach a
-          // line-oriented log.
+        // The observed facts go to the local log, never back to a caller the
+        // fence just refused. Header values are caller-controlled, so they are
+        // stripped of control characters and capped before they reach a
+        // line-oriented log.
+        const refuse = (reason: PowerTrustRejectReason, status: 401 | 403): unknown => {
           try {
-            appendLog(LOG_FILE, `${new Date().toISOString()} refused ${req.method} ${sub}: ${verdict.reason}`
+            appendLog(LOG_FILE, `${new Date().toISOString()} refused ${req.method} ${sub}: ${reason}`
               + ` host=${logSafe(req.headers.host)} origin=${logSafe(req.headers.origin)}`
               + ` sec-fetch-site=${logSafe(req.headers['sec-fetch-site'])}`
               + ` remote=${logSafe(req.socket?.remoteAddress)}\n`)
           } catch { /* ignore */ }
-          return json(res, 403, {
+          return json(res, status, {
             ok: false,
             error: 'forbidden: cross-origin power request',
-            reason: verdict.reason,
-            hint: TRUST_REJECT_HINTS[verdict.reason],
+            reason,
+            hint: TRUST_REJECT_HINTS[reason],
           })
+        }
+        // Prefer the deployment's own fence and authentication: it knows the
+        // authorities that exist at runtime, including the LAN literals a Web
+        // runtime derives from an all-interface bind, and the operator declares
+        // them in one place. `null` means this host has no such service, and
+        // this plugin's own fence is then the guard.
+        const hostRejection = connectionRejection(ctx, req)
+        if (hostRejection === null) {
+          // The host's `--trusted-host` declarations, so an authority DSH serves
+          // is not refused for not being loopback; and the address it actually
+          // listens on, which decides whether an off-box peer is even possible.
+          const verdict = explainPowerRequestTrust(req, declaredTrustedHosts(ctx), boundHostOf(ctx))
+          if (!verdict.trusted) return refuse(verdict.reason, 403)
+        } else if (hostRejection !== undefined) {
+          return refuse(hostRejection === 401 ? 'not-authenticated' : 'host-fence', hostRejection)
         }
       }
       try {
