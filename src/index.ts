@@ -807,18 +807,23 @@ export async function flushSessionsBounded(ctx: any, capMs: number): Promise<Pre
   try {
     const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
     if (live.length === 0) return empty
-    const flushing = Promise.allSettled(live.map((session: unknown) => ctx.sessions.flush(session)))
-    // A discriminated wrapper keeps the cap distinguishable from a slow but
-    // finished flush without relying on a sentinel value inside a union.
-    const attempt = await Promise.race([
-      flushing.then(results => ({ timedOut: false as const, results })),
-      sleep(capMs).then(() => ({ timedOut: true as const, results: [] as PromiseSettledResult<unknown>[] })),
+    // Counted as each session settles rather than read off a completed
+    // `allSettled`, so a cap that expires part-way still reports the progress
+    // that was made. Wrapping in `Promise.resolve().then(...)` also turns a
+    // synchronously throwing `flush` into that session's rejection instead of
+    // losing the whole tally to the outer catch.
+    let fulfilled = 0
+    let rejected = 0
+    const tracked = live.map((session: unknown) => Promise.resolve()
+      .then(() => ctx.sessions.flush(session))
+      .then(() => { fulfilled += 1 }, () => { rejected += 1 }))
+    const timedOut = await Promise.race([
+      Promise.allSettled(tracked).then(() => false as const),
+      sleep(capMs).then(() => true as const),
     ])
-    if (attempt.timedOut) return { live: live.length, fulfilled: 0, rejected: 0, timedOut: true }
-    const rejected = attempt.results.filter(result => result.status === 'rejected').length
-    return { live: live.length, fulfilled: attempt.results.length - rejected, rejected, timedOut: false }
+    return { live: live.length, fulfilled, rejected, timedOut }
   } catch (error) {
-    // A throwing flush is not a reason to hold the exit either.
+    // A throwing `sessions.list()` is not a reason to hold the exit either.
     return { ...empty, error: error instanceof Error ? error.message : String(error) }
   }
 }
@@ -1182,6 +1187,7 @@ function sessionsQuiescent(maxWaitMs) {
     // so the new process can claim the restart no matter how early it boots.
     // (The previous protocol confirmed the relaunch in the marker only AFTER
     // the child spawned — a fast boot could read "no marker yet" and miss it.)
+    let markerWriteError = null;
     try {
       fs.writeFileSync(MARKER, JSON.stringify({
         schemaVersion: 2,
@@ -1190,7 +1196,13 @@ function sessionsQuiescent(maxWaitMs) {
         origin: ORIGIN,
         requestedAt: REQUESTED_AT,
       }), 'utf8');
-    } catch {}
+    } catch (e) {
+      // The relaunched process claims its restart identity FROM this file, so a
+      // failed write makes that identity unclaimable. Record it here instead of
+      // letting it surface later as an unexplained readiness timeout.
+      markerWriteError = e && e.message ? e.message : String(e);
+      log('marker write failed: ' + markerWriteError);
+    }
     // Retry only when NO process was created. Once a process exists, starting
     // another one would race the first for the port.
     let child = null;
@@ -1206,6 +1218,14 @@ function sessionsQuiescent(maxWaitMs) {
     }
     const health = await waitForReady(child);
     if (health === null) {
+      // A process that started fine cannot claim the restart when the marker
+      // never landed, so naming that case is what keeps 'restart failed, though
+      // the service is up' from being reported as a plain startup failure.
+      if (markerWriteError !== null) {
+        fail('marker-write-failed', 'the restart marker could not be written (' + markerWriteError
+          + '), so the relaunched process could not claim this restart identity');
+        return;
+      }
       fail('health-timeout', 'new process did not answer /health within ' + READY_WAIT_MS + 'ms');
       return;
     }

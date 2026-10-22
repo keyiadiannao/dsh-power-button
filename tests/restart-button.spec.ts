@@ -431,6 +431,19 @@ describe('pre-exit durability barrier', () => {
     )
   })
 
+  it('keeps the completed count when the cap expires with work still outstanding', async () => {
+    // The interesting failure is partial progress: three of five landed, one
+    // never settles. Reporting 0/0 here would erase what actually succeeded.
+    const ctx = {
+      sessions: {
+        list: () => ['a', 'b', 'c', 'd', 'stuck'],
+        flush: (s: string) => (s === 'stuck' ? new Promise(() => {}) : Promise.resolve()),
+      },
+    }
+    const outcome = await flushSessionsBounded(ctx, 100)
+    expect(outcome).toEqual({ live: 5, fulfilled: 4, rejected: 0, timedOut: true })
+  })
+
   it('reports nothing to flush when no session is live', async () => {
     await expect(flushSessionsBounded({ sessions: { list: () => [], flush: () => Promise.resolve() } }, 50))
       .resolves.toEqual({ live: 0, fulfilled: 0, rejected: 0, timedOut: false })
@@ -439,16 +452,27 @@ describe('pre-exit durability barrier', () => {
       .resolves.toEqual({ live: 0, fulfilled: 0, rejected: 0, timedOut: false })
   })
 
-  it('reports a throwing flush fan-out as an error instead of rejecting', async () => {
+  it('counts a synchronously throwing flush against that session, not the whole tally', async () => {
     const ctx = {
       sessions: {
-        list: () => ['a'],
-        flush: () => { throw new Error('service disposed') },
+        list: () => ['ok', 'throws'],
+        flush: (s: string) => {
+          if (s === 'throws') throw new Error('service disposed')
+          return Promise.resolve()
+        },
       },
     }
+    await expect(flushSessionsBounded(ctx, 500)).resolves.toEqual(
+      { live: 2, fulfilled: 1, rejected: 1, timedOut: false },
+    )
+  })
+
+  it('reports a throwing session listing as an error instead of rejecting', async () => {
+    const ctx = { sessions: { list: () => { throw new Error('store gone') }, flush: () => Promise.resolve() } }
     const outcome = await flushSessionsBounded(ctx, 500)
     expect(outcome.timedOut).toBe(false)
-    expect(outcome.error).toContain('service disposed')
+    expect(outcome.live).toBe(0)
+    expect(outcome.error).toContain('store gone')
   })
 
   it('keeps the helper waiting strictly longer than the host can take to exit', () => {

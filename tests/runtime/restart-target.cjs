@@ -18,6 +18,10 @@ function argOf(name) {
 // the helper which port to wait for.
 const PORT = Number(argOf('--port'))
 const PORT_FILE = argOf('--port-file')
+// Where the helper writes the restart marker. The real DSH instance claims its
+// restart identity only when the launch token AND this file agree, so a target
+// that ignored the file would report a restart the real one could never prove.
+const MARKER = argOf('--marker')
 const INSTANCE_ID = argOf('--instance-id') ?? 'unknown-instance'
 const FORGET_RESTART = args.includes('--forget-restart')
 if (!Number.isInteger(PORT) || PORT < 0) {
@@ -26,6 +30,17 @@ if (!Number.isInteger(PORT) || PORT < 0) {
 }
 
 const server = http.createServer((req, res) => {
+  /** True when the marker on disk carries this launch's restart id. */
+  function markerAgrees() {
+    if (MARKER === undefined) return true
+    try {
+      return JSON.parse(fs.readFileSync(MARKER, 'utf8')).restartId === process.env.DSH_POWER_RESTART_ID
+    } catch {
+      // No marker, or an unreadable one: the claim cannot be proved, exactly as
+      // in the real host where a failed marker write leaves it unclaimable.
+      return false
+    }
+  }
   const url = new URL(req.url ?? '/', 'http://x')
   if (req.method === 'GET' && url.pathname === '/api/dsh-power-button/health') {
     // Mirror the real plugin: a process relaunched by the helper inherits
@@ -33,7 +48,7 @@ const server = http.createServer((req, res) => {
     // unless the test passes --forget-restart to simulate an instance that
     // cannot prove its restart (manual boot, foreign instance).
     const body = { ok: true, instanceId: INSTANCE_ID }
-    if (process.env.DSH_POWER_RESTART_ID && !FORGET_RESTART) {
+    if (process.env.DSH_POWER_RESTART_ID && !FORGET_RESTART && markerAgrees()) {
       body.restart = { restartId: process.env.DSH_POWER_RESTART_ID }
     }
     res.writeHead(200, { 'content-type': 'application/json' })

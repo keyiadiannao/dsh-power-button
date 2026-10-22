@@ -105,6 +105,9 @@ async function startRidge(opts: {
   /** Play the `--port 0` case: the old target lets the OS choose its port, and
    * the relaunch argv is built through the plugin's own port pin. */
   dynamicPort?: boolean
+  /** Point the restart marker at an uncreatable path, so the helper's write
+   * fails while the successor still boots. */
+  markerWriteFails?: boolean
 } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-power-e2e-'))
   const portFile = join(home, 'port.txt')
@@ -120,7 +123,13 @@ async function startRidge(opts: {
   if (up === null) throw new Error('fake old target never became healthy')
 
   const restartId = randomUUID()
-  const markerFile = join(home, 'marker.json')
+  // A file where the marker's parent directory should be makes the helper's
+  // writeFileSync fail with ENOTDIR, which is the real failure this models:
+  // the write itself breaks, not the process launch.
+  const markerFile = opts.markerWriteFails
+    ? join(home, 'blocked', 'marker.json')
+    : join(home, 'marker.json')
+  if (opts.markerWriteFails) writeFileSync(join(home, 'blocked'), 'not a directory', 'utf8')
   const statusFile = join(home, 'status.json')
   const helperFile = join(home, 'helper.cjs')
   const commitFile = join(home, 'commit.json')
@@ -131,8 +140,8 @@ async function startRidge(opts: {
   // verbatim `--port 0` replay would land on a different port than the helper
   // is waiting for.
   const relaunchArgs = opts.dynamicPort
-    ? [relaunchExec, TARGET, ...pinRelaunchPort(['--port', '0', '--instance-id', relaunchInstance], port)]
-    : [relaunchExec, TARGET, '--port', String(port), '--instance-id', relaunchInstance]
+    ? [relaunchExec, TARGET, ...pinRelaunchPort(['--port', '0', '--instance-id', relaunchInstance], port), '--marker', markerFile]
+    : [relaunchExec, TARGET, '--port', String(port), '--instance-id', relaunchInstance, '--marker', markerFile]
   if (opts.forgetRestart) relaunchArgs.push('--forget-restart')
   writeFileSync(helperFile, buildRestartHelper({
     relaunch: relaunchArgs,
@@ -326,6 +335,35 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       expect((done?.failure as { code?: string } | undefined)?.code).toBe('health-timeout')
       expect(done?.attempt).toBe(1)
       newPid = done?.newPid as number
+    } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('names a failed restart-marker write instead of reporting a health timeout', { timeout: 45_000 }, async () => {
+    // A marker that cannot be written leaves the successor unable to claim this
+    // restart, so readiness fails while the process itself started fine. The
+    // failure must say which of the two happened; reporting a health timeout
+    // sends the reader looking at a process that is actually healthy.
+    const rig = await startRidge({ markerWriteFails: true, readyWaitMs: 2_500 })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 30_000)
+      expect(done?.stage).toBe('failed')
+      const failure = done?.failure as { code?: string, message?: string } | undefined
+      expect(failure?.code).toBe('marker-write-failed')
+      expect(failure?.message).toContain('marker')
+      // The launch still happened: this is a diagnosis change, not a policy one.
+      expect(done?.attempt).toBe(1)
+      newPid = done?.newPid as number
+      // The helper recorded the write failure when it happened, not only at the end.
+      expect(readFileSync(join(rig.home, 'helper.log'), 'utf8')).toContain('marker write failed')
     } finally {
       killPid(rig.old.pid)
       killPid(newPid)
