@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -108,6 +108,9 @@ async function startRidge(opts: {
   /** Point the restart marker at an uncreatable path, so the helper's write
    * fails while the successor still boots. */
   markerWriteFails?: boolean
+  /** Shorten the session-quiescence window so a still-moving log is reachable
+   * inside a test instead of after fifteen seconds. */
+  quiescenceWaitMs?: number
 } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-power-e2e-'))
   const portFile = join(home, 'port.txt')
@@ -163,6 +166,9 @@ async function startRidge(opts: {
     // so it supplies a short bound that is still comfortably longer than the
     // fake old process needs to die.
     oldPidWaitMs: opts.oldPidWaitMs ?? 10_000,
+    // Spread rather than pass-through: the payload field is optional, and
+    // `exactOptionalPropertyTypes` rejects an explicit `undefined`.
+    ...(opts.quiescenceWaitMs === undefined ? {} : { quiescenceWaitMs: opts.quiescenceWaitMs }),
     requestedAt: new Date().toISOString(),
   }), 'utf8')
 
@@ -365,6 +371,42 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       // The helper recorded the write failure when it happened, not only at the end.
       expect(readFileSync(join(rig.home, 'helper.log'), 'utf8')).toContain('marker write failed')
     } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('records a still-moving session log and proceeds anyway', { timeout: 60_000 }, async () => {
+    // The quiescence check exists because a writer can still be draining when
+    // the old process exits. This pins the CURRENT policy: the helper records
+    // `sessionQuiescent: false` and relaunches regardless. Changing that to a
+    // refusal is a product decision, and this case is what makes the change
+    // visible instead of silent.
+    const rig = await startRidge({ quiescenceWaitMs: 600 })
+    let newPid: number | undefined
+    const sessionDir = join(rig.home, 'sessions')
+    mkdirSync(sessionDir, { recursive: true })
+    const sessionLog = join(sessionDir, 'live-session.jsonl')
+    let n = 0
+    const writer = setInterval(() => {
+      // A size change on every tick is what the (size, mtimeMs) stamp compares.
+      writeFileSync(sessionLog, JSON.stringify({ seq: n++, pad: 'x'.repeat(2048) }) + '\n', { flag: 'a' })
+    }, 80)
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 30_000)
+      expect(done?.sessionQuiescent).toBe(false)
+      // Proceeding is the current behaviour, not an accident: the relaunch
+      // completed and the marker was written.
+      expect(done?.stage).toBe('ready')
+      newPid = done?.newPid as number
+      expect(readFileSync(join(rig.home, 'helper.log'), 'utf8')).toContain('proceeding anyway')
+    } finally {
+      clearInterval(writer)
       killPid(rig.old.pid)
       killPid(newPid)
       killPid(rig.helper.pid)

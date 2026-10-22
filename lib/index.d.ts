@@ -262,7 +262,12 @@ interface PreExitFlushOutcome {
   rejected: number;
   /** The cap expired first, so the counts describe only what had settled. */
   timedOut: boolean;
-  /** `sessions.list()` or the fan-out threw; no per-session result exists. */
+  /**
+   * No session service was reachable, so `live: 0` means "unknown", not "none".
+   * Reporting both as zero would make a host without the service look clean.
+   */
+  unavailable?: boolean;
+  /** `sessions.list()` threw; no per-session result exists. */
   error?: string;
 }
 /**
@@ -305,6 +310,12 @@ interface RestartHelperPayload {
    * abandons a process that is still on its way out and nobody relaunches.
    */
   oldPidWaitMs: number;
+  /**
+   * How long the helper polls session files for a stable snapshot before it
+   * proceeds anyway. Defaulted rather than required so the acceptance rig can
+   * shorten it to exercise the still-moving case in seconds.
+   */
+  quiescenceWaitMs?: number;
   requestedAt: string;
   /** Who asked, recorded so the new process can attribute the restart without
    * guessing. Absent when the caller had no causal session. */

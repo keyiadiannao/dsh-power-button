@@ -447,9 +447,16 @@ describe('pre-exit durability barrier', () => {
   it('reports nothing to flush when no session is live', async () => {
     await expect(flushSessionsBounded({ sessions: { list: () => [], flush: () => Promise.resolve() } }, 50))
       .resolves.toEqual({ live: 0, fulfilled: 0, rejected: 0, timedOut: false })
-    // A host without the session service is the same case, not an error.
-    await expect(flushSessionsBounded({}, 50))
-      .resolves.toEqual({ live: 0, fulfilled: 0, rejected: 0, timedOut: false })
+  })
+
+  it('marks an unreachable session service instead of reporting a clean zero', async () => {
+    // "We could not ask" and "there was nothing to flush" are both zero live
+    // sessions but different facts; the exit proceeds either way, so only the
+    // record can tell them apart.
+    for (const ctx of [{}, { sessions: {} }] as Array<Record<string, unknown>>) {
+      const outcome = await flushSessionsBounded(ctx, 50)
+      expect(outcome).toEqual({ live: 0, fulfilled: 0, rejected: 0, timedOut: false, unavailable: true })
+    }
   })
 
   it('counts a synchronously throwing flush against that session, not the whole tally', async () => {

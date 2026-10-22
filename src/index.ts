@@ -786,7 +786,12 @@ export interface PreExitFlushOutcome {
   rejected: number
   /** The cap expired first, so the counts describe only what had settled. */
   timedOut: boolean
-  /** `sessions.list()` or the fan-out threw; no per-session result exists. */
+  /**
+   * No session service was reachable, so `live: 0` means "unknown", not "none".
+   * Reporting both as zero would make a host without the service look clean.
+   */
+  unavailable?: boolean
+  /** `sessions.list()` threw; no per-session result exists. */
   error?: string
 }
 
@@ -805,7 +810,13 @@ export interface PreExitFlushOutcome {
 export async function flushSessionsBounded(ctx: any, capMs: number): Promise<PreExitFlushOutcome> {
   const empty: PreExitFlushOutcome = { live: 0, fulfilled: 0, rejected: 0, timedOut: false }
   try {
-    const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
+    if (typeof ctx.sessions?.list !== 'function') {
+      // Distinguished from an empty list on purpose: the exit is just as
+      // unbounded either way, but a reader must not mistake "we could not ask"
+      // for "there was nothing to flush".
+      return { ...empty, unavailable: true }
+    }
+    const live = ctx.sessions.list()
     if (live.length === 0) return empty
     // Counted as each session settles rather than read off a completed
     // `allSettled`, so a cap that expires part-way still reports the progress
@@ -834,6 +845,7 @@ function logFlushOutcome(where: 'restart' | 'shutdown', outcome: PreExitFlushOut
     appendLog(LOG_FILE, `${new Date().toISOString()} pre-exit flush (${where}): live=${outcome.live}`
       + ` fulfilled=${outcome.fulfilled} rejected=${outcome.rejected}`
       + ` timedOut=${outcome.timedOut}`
+      + (outcome.unavailable === true ? ' unavailable=true' : '')
       + (outcome.error === undefined ? '' : ` error=${logSafe(outcome.error)}`)
       + '\n')
   } catch { /* a log that cannot be written must not block the exit */ }
@@ -952,6 +964,12 @@ export interface RestartHelperPayload {
    * abandons a process that is still on its way out and nobody relaunches.
    */
   oldPidWaitMs: number
+  /**
+   * How long the helper polls session files for a stable snapshot before it
+   * proceeds anyway. Defaulted rather than required so the acceptance rig can
+   * shorten it to exercise the still-moving case in seconds.
+   */
+  quiescenceWaitMs?: number
   requestedAt: string
   /** Who asked, recorded so the new process can attribute the restart without
    * guessing. Absent when the caller had no causal session. */
@@ -986,6 +1004,8 @@ const SESSIONS_ROOT = ${JSON.stringify(p.sessionsRoot)};
 const COMMIT_WAIT_MS = ${p.commitWaitMs};
 const READY_WAIT_MS = ${p.readyWaitMs};
 const OLD_PID_WAIT_MS = ${p.oldPidWaitMs};
+// Only the acceptance rig shortens this; production passes the 15s default.
+const QUIESCENCE_WAIT_MS = ${p.quiescenceWaitMs ?? 15000};
 const RELAUNCH_RETRIES = 3;
 const REQUESTED_AT = ${JSON.stringify(p.requestedAt)};
 const ORIGIN = ${JSON.stringify(p.origin ?? null)};
@@ -1173,9 +1193,9 @@ function sessionsQuiescent(maxWaitMs) {
     // the restart-time corruption window: the new instance must never read a
     // session file the old one is still appending to.
     patchStatus({ stage: 'quiescing', portFreedAt: new Date().toISOString() });
-    const quiescent = await sessionsQuiescent(15000);
+    const quiescent = await sessionsQuiescent(QUIESCENCE_WAIT_MS);
     patchStatus({ sessionQuiescent: quiescent });
-    log(quiescent ? 'session logs quiescent' : 'session logs still moving after 15s - proceeding anyway');
+    log(quiescent ? 'session logs quiescent' : 'session logs still moving after ' + QUIESCENCE_WAIT_MS + 'ms - proceeding anyway');
     // Relaunch breadcrumb with an ALLOWLIST only: the full argv is never logged
     // (plugin CLI args can carry credentials, and even a good redactor is one
     // regex away from leaking a value — same rule as the host boot breadcrumb).
