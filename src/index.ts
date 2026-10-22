@@ -824,9 +824,8 @@ export async function flushSessionsBounded(ctx: any, capMs: number): Promise<Pre
 }
 
 /** Record one exit attempt's flush outcome: the line a post-mortem reads. */
-function logFlushOutcome(ctx: any, where: 'restart' | 'shutdown', outcome: PreExitFlushOutcome): void {
+function logFlushOutcome(where: 'restart' | 'shutdown', outcome: PreExitFlushOutcome): void {
   try {
-    void ctx
     appendLog(LOG_FILE, `${new Date().toISOString()} pre-exit flush (${where}): live=${outcome.live}`
       + ` fulfilled=${outcome.fulfilled} rejected=${outcome.rejected}`
       + ` timedOut=${outcome.timedOut}`
@@ -1320,7 +1319,7 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     // helper is already waiting for this process to exit. The cap is what keeps
     // a stuck flush from outliving the helper's patience.
     void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then((outcome) => {
-      logFlushOutcome(ctx, 'restart', outcome)
+      logFlushOutcome('restart', outcome)
       scheduleExit()
     })
     return { ok: true, action: 'restart', restartId, note: isEnglishLocale(ctx) ? 'DeepSeek Harness is restarting' : 'DeepSeek Harness 正在重启' }
@@ -1369,7 +1368,7 @@ export function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | 
       if (exitArmed) return
       exitArmed = true
       void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then((outcome) => {
-        logFlushOutcome(ctx, 'shutdown', outcome)
+        logFlushOutcome('shutdown', outcome)
         exitNow()
       })
     }
