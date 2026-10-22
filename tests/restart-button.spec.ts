@@ -402,10 +402,55 @@ describe('pre-exit durability barrier', () => {
     expect(Date.now() - started).toBeLessThan(2_000)
   })
 
-  // The invariant that actually matters: the helper's patience is DERIVED from
-  // the Host's worst-case exit budget. If either side is ever changed alone and
-  // the helper ends up the shorter of the two, it abandons a process that is
-  // still shutting down and nothing relaunches the harness.
+  // The outcome exists so a refused or partial flush is visible afterwards. A
+  // durable-log promise is only as good as the evidence that it held, and these
+  // cases pin the three states that used to be indistinguishable.
+  it('reports a complete flush with every session fulfilled', async () => {
+    const ctx = { sessions: { list: () => ['a', 'b'], flush: () => Promise.resolve() } }
+    await expect(flushSessionsBounded(ctx, 500)).resolves.toEqual(
+      { live: 2, fulfilled: 2, rejected: 0, timedOut: false },
+    )
+  })
+
+  it('reports a partial flush: a rejected session is counted, not swallowed', async () => {
+    const ctx = {
+      sessions: {
+        list: () => ['ok', 'bad'],
+        flush: (s: string) => (s === 'bad' ? Promise.reject(new Error('disk full')) : Promise.resolve()),
+      },
+    }
+    await expect(flushSessionsBounded(ctx, 500)).resolves.toEqual(
+      { live: 2, fulfilled: 1, rejected: 1, timedOut: false },
+    )
+  })
+
+  it('distinguishes the cap from a flush that merely finished slowly', async () => {
+    const ctx = { sessions: { list: () => ['a'], flush: () => new Promise(() => {}) } }
+    await expect(flushSessionsBounded(ctx, 50)).resolves.toEqual(
+      { live: 1, fulfilled: 0, rejected: 0, timedOut: true },
+    )
+  })
+
+  it('reports nothing to flush when no session is live', async () => {
+    await expect(flushSessionsBounded({ sessions: { list: () => [], flush: () => Promise.resolve() } }, 50))
+      .resolves.toEqual({ live: 0, fulfilled: 0, rejected: 0, timedOut: false })
+    // A host without the session service is the same case, not an error.
+    await expect(flushSessionsBounded({}, 50))
+      .resolves.toEqual({ live: 0, fulfilled: 0, rejected: 0, timedOut: false })
+  })
+
+  it('reports a throwing flush fan-out as an error instead of rejecting', async () => {
+    const ctx = {
+      sessions: {
+        list: () => ['a'],
+        flush: () => { throw new Error('service disposed') },
+      },
+    }
+    const outcome = await flushSessionsBounded(ctx, 500)
+    expect(outcome.timedOut).toBe(false)
+    expect(outcome.error).toContain('service disposed')
+  })
+
   it('keeps the helper waiting strictly longer than the host can take to exit', () => {
     for (const delayMs of [0, 1_500, 5_000]) {
       const budget = preExitBudgetMs(delayMs)

@@ -776,22 +776,63 @@ export function helperOldPidWaitMs(delayMs: number): number {
   return preExitBudgetMs(delayMs) + HELPER_OLD_PID_MARGIN_MS
 }
 
+/** What the bounded pre-exit flush achieved. */
+export interface PreExitFlushOutcome {
+  /** Sessions live when the flush started. */
+  live: number
+  /** Sessions whose flush settled successfully. */
+  fulfilled: number
+  /** Sessions whose flush rejected. */
+  rejected: number
+  /** The cap expired first, so the counts describe only what had settled. */
+  timedOut: boolean
+  /** `sessions.list()` or the fan-out threw; no per-session result exists. */
+  error?: string
+}
+
 /**
- * Flush every live session, bounded. Returning late is never worth blocking the
- * exit on: the helper is already waiting, and a flush that never settles would
- * strand the restart with no process left to relaunch it.
+ * Flush every live session, bounded, and report what the attempt achieved.
+ *
+ * Returning late is never worth blocking the exit on: the helper is already
+ * waiting, and a flush that never settles would strand the restart with no
+ * process left to relaunch it. The outcome exists so a refused or partial
+ * flush is visible afterwards instead of being indistinguishable from success
+ * — a durable-log guarantee needs evidence, and this is the evidence.
  * @param ctx - host context carrying the session service.
  * @param capMs - hard upper bound on the wait.
+ * @returns the per-session tally, or `timedOut`/`error` when no tally exists.
  */
-export async function flushSessionsBounded(ctx: any, capMs: number): Promise<void> {
+export async function flushSessionsBounded(ctx: any, capMs: number): Promise<PreExitFlushOutcome> {
+  const empty: PreExitFlushOutcome = { live: 0, fulfilled: 0, rejected: 0, timedOut: false }
   try {
     const live = typeof ctx.sessions?.list === 'function' ? ctx.sessions.list() : []
-    if (live.length === 0) return
+    if (live.length === 0) return empty
     const flushing = Promise.allSettled(live.map((session: unknown) => ctx.sessions.flush(session)))
-    await Promise.race([flushing, sleep(capMs)])
-  } catch {
+    // A discriminated wrapper keeps the cap distinguishable from a slow but
+    // finished flush without relying on a sentinel value inside a union.
+    const attempt = await Promise.race([
+      flushing.then(results => ({ timedOut: false as const, results })),
+      sleep(capMs).then(() => ({ timedOut: true as const, results: [] as PromiseSettledResult<unknown>[] })),
+    ])
+    if (attempt.timedOut) return { live: live.length, fulfilled: 0, rejected: 0, timedOut: true }
+    const rejected = attempt.results.filter(result => result.status === 'rejected').length
+    return { live: live.length, fulfilled: attempt.results.length - rejected, rejected, timedOut: false }
+  } catch (error) {
     // A throwing flush is not a reason to hold the exit either.
+    return { ...empty, error: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/** Record one exit attempt's flush outcome: the line a post-mortem reads. */
+function logFlushOutcome(ctx: any, where: 'restart' | 'shutdown', outcome: PreExitFlushOutcome): void {
+  try {
+    void ctx
+    appendLog(LOG_FILE, `${new Date().toISOString()} pre-exit flush (${where}): live=${outcome.live}`
+      + ` fulfilled=${outcome.fulfilled} rejected=${outcome.rejected}`
+      + ` timedOut=${outcome.timedOut}`
+      + (outcome.error === undefined ? '' : ` error=${logSafe(outcome.error)}`)
+      + '\n')
+  } catch { /* a log that cannot be written must not block the exit */ }
 }
 
 /** Directory holding per-restart handshake files. */
@@ -1278,7 +1319,10 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     // Fire-and-forget: the tool result must not wait on the flush, and the
     // helper is already waiting for this process to exit. The cap is what keeps
     // a stuck flush from outliving the helper's patience.
-    void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then(scheduleExit)
+    void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then((outcome) => {
+      logFlushOutcome(ctx, 'restart', outcome)
+      scheduleExit()
+    })
     return { ok: true, action: 'restart', restartId, note: isEnglishLocale(ctx) ? 'DeepSeek Harness is restarting' : 'DeepSeek Harness 正在重启' }
   } catch (e) {
     // Nothing before the handshake completed may end this process: an exit
@@ -1324,7 +1368,10 @@ export function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | 
     const exitSoon = (): void => {
       if (exitArmed) return
       exitArmed = true
-      void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then(exitNow)
+      void flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS).then((outcome) => {
+        logFlushOutcome(ctx, 'shutdown', outcome)
+        exitNow()
+      })
     }
     if (res !== undefined && typeof res.once === 'function') {
       // HTTP path: exit on THIS response's 'finish' so the client sees the

@@ -252,14 +252,32 @@ declare function preExitBudgetMs(delayMs: number): number;
  * @returns milliseconds, strictly greater than the Host's own budget.
  */
 declare function helperOldPidWaitMs(delayMs: number): number;
+/** What the bounded pre-exit flush achieved. */
+interface PreExitFlushOutcome {
+  /** Sessions live when the flush started. */
+  live: number;
+  /** Sessions whose flush settled successfully. */
+  fulfilled: number;
+  /** Sessions whose flush rejected. */
+  rejected: number;
+  /** The cap expired first, so the counts describe only what had settled. */
+  timedOut: boolean;
+  /** `sessions.list()` or the fan-out threw; no per-session result exists. */
+  error?: string;
+}
 /**
- * Flush every live session, bounded. Returning late is never worth blocking the
- * exit on: the helper is already waiting, and a flush that never settles would
- * strand the restart with no process left to relaunch it.
+ * Flush every live session, bounded, and report what the attempt achieved.
+ *
+ * Returning late is never worth blocking the exit on: the helper is already
+ * waiting, and a flush that never settles would strand the restart with no
+ * process left to relaunch it. The outcome exists so a refused or partial
+ * flush is visible afterwards instead of being indistinguishable from success
+ * — a durable-log guarantee needs evidence, and this is the evidence.
  * @param ctx - host context carrying the session service.
  * @param capMs - hard upper bound on the wait.
+ * @returns the per-session tally, or `timedOut`/`error` when no tally exists.
  */
-declare function flushSessionsBounded(ctx: any, capMs: number): Promise<void>;
+declare function flushSessionsBounded(ctx: any, capMs: number): Promise<PreExitFlushOutcome>;
 /** Everything the generated helper needs; every path must be absolute.
  * Exported so the runtime acceptance tests can drive the EXACT shipped helper
  * script against fake target processes instead of a real DSH instance. */
@@ -436,4 +454,4 @@ declare function connectionRejection(ctx: any, req: {
 }): 401 | 403 | undefined | null;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
