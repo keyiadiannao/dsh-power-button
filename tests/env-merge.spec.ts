@@ -58,6 +58,16 @@ describe('parseEnvRegExport', () => {
     expect(parsed).toHaveLength(1)
     expect(parsed[0]?.value).toBe(long)
   })
+
+  it('rejects a payload with an empty token instead of decoding the rest', () => {
+    // A doubled comma means the export was mis-joined. Decoding the surviving
+    // bytes would produce a plausible-looking value from the wrong positions.
+    expect(parseEnvRegExport('[HKEY_CURRENT_USER\\Environment]\r\n"X"=hex(2):41,,00,00,00\r\n'))
+      .toEqual([])
+    // An odd byte count is rejected the same way.
+    expect(parseEnvRegExport('[HKEY_CURRENT_USER\\Environment]\r\n"Y"=hex(2):41,00,42\r\n'))
+      .toEqual([])
+  })
 })
 
 describe('mergeEnvironment', () => {

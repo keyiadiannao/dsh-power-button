@@ -1059,10 +1059,10 @@ export function parseEnvRegExport(text: string): EnvRegistryValue[] {
   const unquote = (s: string): string => s.replace(/\\(.)/g, '$1')
   /** `hex(2)` payload: comma-separated bytes holding UTF-16LE text, or null. */
   const utf16FromHex = (list: string): string | null => {
-    const tokens = list.split(',').filter(token => token !== '')
-    // Two hex digits each, and an even count. Anything else means the export was
-    // truncated or mis-joined, and decoding it would build a plausible value out
-    // of the wrong bytes.
+    // No empty tokens are tolerated, including a doubled comma: after unfolding a
+    // continuation there is never one, so an empty token means the export was
+    // mis-joined and decoding it would build a plausible value from wrong bytes.
+    const tokens = list.split(',')
     if (tokens.length === 0) return null
     if (tokens.some(token => !/^[0-9a-f]{2}$/i.test(token))) return null
     if (tokens.length % 2 !== 0) return null
@@ -1192,7 +1192,6 @@ export function mergeEnvironment(
     }
     set('PATH', ordered.join(';'))
   }
-  return { env, source: 'registry' }
   return { env, source: 'registry' }
 }
 
