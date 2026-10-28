@@ -31,6 +31,11 @@
  *     port this process actually bound, so the successor lands where the helper
  *     is waiting. The old process self-exits after a short delay so the HTTP
  *     response flushes.
+ *   - The successor's environment is re-read from the registry (user + machine)
+ *     instead of inherited. A process environment is a launcher-time snapshot,
+ *     so inheriting it replays values the user has since changed with setx or
+ *     System Properties, and the restarted instance looks identical to the old
+ *     one — the reported "environment inheritance" defect.
  *   - No taskkill /T /F (it walks the parent-child chain and kills the helper),
  *     no PowerShell (window popup + quoting traps).
  *
@@ -983,7 +988,7 @@ export interface RestartHelperPayload {
  */
 export function buildRestartHelper(p: RestartHelperPayload): string {
   return `
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const net = require('node:net');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -1011,6 +1016,90 @@ const REQUESTED_AT = ${JSON.stringify(p.requestedAt)};
 const ORIGIN = ${JSON.stringify(p.origin ?? null)};
 function log(m) {
   try { fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\\n'); } catch {}
+}
+// The successor must start from the CURRENT OS environment. A process
+// environment is a snapshot captured when its launcher started, and this helper
+// only inherits the OLD DSH process's copy, so a variable changed after that
+// process started (setx, System Properties, an installer) would never reach the
+// relaunched instance. Re-read it from the registry instead: that is what a
+// freshly opened shell would see. reg.exe is used rather than PowerShell
+// because it opens no window and carries no quoting traps.
+const ENV_KEY_PATHS = [
+  'HKCU\\\\Environment',
+  'HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Environment',
+];
+function registryEnv() {
+  const out = {};
+  if (process.platform !== 'win32') return out;
+  for (const keyPath of ENV_KEY_PATHS) {
+    let text;
+    try {
+      text = execFileSync('reg', ['query', keyPath], {
+        encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch { continue; }
+    for (const line of String(text).split(/\\r?\\n/)) {
+      const m = /^\\s{4}(\\S[^\\r\\n]*?)\\s{4}(REG_[A-Z_]+)\\s{4}([\\s\\S]*)$/.exec(line);
+      if (!m) continue;
+      const name = m[1];
+      const type = m[2];
+      const raw = m[3];
+      if (type === 'REG_MULTI_SZ') out[name] = raw.split('\\\\0').filter(Boolean).join(';');
+      else if (type === 'REG_DWORD') out[name] = String(parseInt(raw, 16));
+      else out[name] = raw;
+    }
+  }
+  return out;
+}
+// Windows environment names are case-insensitive, so a lookup must be too:
+// writing "Path" beside an inherited "PATH" would give the child two spellings.
+function envKey(env, name) {
+  const wanted = name.toLowerCase();
+  return Object.keys(env).find((k) => k.toLowerCase() === wanted);
+}
+function expandEnvValue(value, env) {
+  return value.replace(/%([^%]+)%/g, (whole, name) => {
+    const key = envKey(env, name);
+    return key === undefined ? whole : env[key];
+  });
+}
+// Registry values lead (they are the current truth); inherited entries survive
+// only where the registry has none. PATH is the exception: pnpm and tsx prepend
+// node_modules/.bin to the launcher's PATH, and dropping those entries would
+// break every child that resolves a binary through PATH, so the registry's
+// entries lead and the inherited extras follow.
+function freshEnv() {
+  const fromRegistry = registryEnv();
+  const merged = Object.assign({}, process.env);
+  const set = (name, value) => {
+    const existing = envKey(merged, name);
+    if (existing !== undefined) delete merged[existing];
+    merged[name] = value;
+  };
+  let registryPath;
+  for (const name of Object.keys(fromRegistry)) {
+    if (name.toLowerCase() === 'path') { registryPath = fromRegistry[name]; continue; }
+    set(name, fromRegistry[name]);
+  }
+  if (registryPath !== undefined) {
+    const entries = registryPath.split(';').filter(Boolean);
+    const seen = new Set(entries.map((e) => e.toLowerCase()));
+    const inheritedKey = envKey(merged, 'path');
+    const inherited = inheritedKey === undefined ? '' : merged[inheritedKey];
+    for (const entry of inherited.split(';').filter(Boolean)) {
+      const lower = entry.toLowerCase();
+      if (seen.has(lower)) continue;
+      entries.push(entry);
+      seen.add(lower);
+    }
+    set('PATH', entries.join(';'));
+  }
+  // REG_EXPAND_SZ arrives as the literal %NAME% text; CreateProcess does not
+  // expand a caller-supplied block, so resolve the references here.
+  for (const name of Object.keys(merged)) {
+    if (merged[name].indexOf('%') !== -1) merged[name] = expandEnvValue(merged[name], merged);
+  }
+  return merged;
 }
 function pidGone(pid) {
   try { process.kill(pid, 0); return false; } catch { return true; }
@@ -1144,7 +1233,7 @@ function sessionsQuiescent(maxWaitMs) {
     const out = fs.openSync(SERVER_LOG, 'a');
     const child = spawn(relaunch[0], relaunch.slice(1), {
       cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
-      env: Object.assign({}, process.env, { DSH_POWER_RESTART_ID: RESTART_ID }),
+      env: Object.assign(freshEnv(), { DSH_POWER_RESTART_ID: RESTART_ID }),
     });
     const spawned = await new Promise((resolve) => {
       child.once('spawn', () => resolve(true));
@@ -1275,8 +1364,10 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
     // Replay the CURRENT invocation, portably (no hard-coded paths):
     // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
-    // script + app args. Spawned children inherit env, so any NODE_OPTIONS
-    // that launched us is preserved too. The port is pinned to the one this
+    // script + app args. The helper inherits this process's environment, and
+    // the successor's own refresh uses it as the base: a NODE_OPTIONS that
+    // launched us survives while variables changed since then are overlaid
+    // from the registry. The port is pinned to the one this
     // process actually bound, so `--port 0` cannot hand the successor a
     // different port than the helper is waiting on and the marker is keyed by.
     const relaunchArgs = [

@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -111,6 +111,9 @@ async function startRidge(opts: {
   /** Shorten the session-quiescence window so a still-moving log is reachable
    * inside a test instead of after fifteen seconds. */
   quiescenceWaitMs?: number
+  /** Extra arguments appended to the successor's argv (the environment test
+   * passes its dump flags through here). */
+  targetArgs?: string[]
 } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-power-e2e-'))
   const portFile = join(home, 'port.txt')
@@ -146,6 +149,7 @@ async function startRidge(opts: {
     ? [relaunchExec, TARGET, ...pinRelaunchPort(['--port', '0', '--instance-id', relaunchInstance], port), '--marker', markerFile]
     : [relaunchExec, TARGET, '--port', String(port), '--instance-id', relaunchInstance, '--marker', markerFile]
   if (opts.forgetRestart) relaunchArgs.push('--forget-restart')
+  if (opts.targetArgs !== undefined) relaunchArgs.push(...opts.targetArgs)
   writeFileSync(helperFile, buildRestartHelper({
     relaunch: relaunchArgs,
     cwd: home,
@@ -407,6 +411,54 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       expect(readFileSync(join(rig.home, 'helper.log'), 'utf8')).toContain('proceeding anyway')
     } finally {
       clearInterval(writer)
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('relaunches with the current OS environment, not the launcher snapshot', { timeout: 60_000 }, async () => {
+    // A process environment is a snapshot captured when its launcher started, so
+    // a variable changed with setx or System Properties AFTER DSH started never
+    // reached the relaunched instance: the "new" server came back identical to
+    // the old one. The helper re-reads the registry, so the successor must see
+    // the registry value even though every process in the chain inherits the
+    // stale one. This case is only meaningful on Windows, where that registry is
+    // the source of truth; elsewhere the helper deliberately keeps inheritance.
+    if (process.platform !== 'win32') return
+    const name = `DSH_POWER_ENV_PROBE_${randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase()}`
+    const stale = 'stale-from-launcher'
+    const fresh = `fresh-${randomUUID()}`
+    const dumpDir = mkdtempSync(join(tmpdir(), 'dsh-power-env-'))
+    const dumpFile = join(dumpDir, 'env.txt')
+    execFileSync('reg', ['add', 'HKCU\\Environment', '/v', name, '/t', 'REG_SZ', '/d', fresh, '/f'], { windowsHide: true })
+    cleanups.push(() => {
+      try {
+        execFileSync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], { windowsHide: true })
+      } catch { /* already removed */ }
+      delete process.env[name]
+      rmSync(dumpDir, { recursive: true, force: true })
+    })
+    // Play the old DSH instance: the value every child in the chain inherits.
+    process.env[name] = stale
+    const rig = await startRidge({
+      targetArgs: ['--dump-env', name, '--dump-env-file', dumpFile],
+    })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 45_000)
+      expect(done?.stage).toBe('ready')
+      newPid = done?.newPid as number
+      // The successor reports what it actually inherited. Without the registry
+      // refresh this reads `stale` — the defect the issue describes.
+      const seen = readFileSync(dumpFile, 'utf8')
+      expect(seen).toBe(fresh)
+      expect(seen).not.toBe(stale)
+    } finally {
       killPid(rig.old.pid)
       killPid(newPid)
       killPid(rig.helper.pid)
