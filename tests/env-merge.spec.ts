@@ -162,6 +162,29 @@ describe('mergeEnvironment', () => {
     expect(merged.env.PATH).toBe('C:\\Windows\\System32;%CUSTOM%\\literal')
   })
 
+  it('expands a value according to the type that WON, not the shadowed one', () => {
+    // Machine stores X as REG_EXPAND_SZ and the user redefines it as REG_SZ. The
+    // winning value is the user's, so its percent signs are literal — a flag
+    // accumulated from the machine entry would expand them anyway.
+    const merged = mergeEnvironment(
+      [value('X', '%HOME%', true)],
+      [value('X', 'literal-%HOME%', false), value('HOME', 'D:\\home')],
+      {},
+    )
+    expect(merged.env.X).toBe('literal-%HOME%')
+  })
+
+  it('dedupes PATH after expanding, so an equivalent entry is not duplicated', () => {
+    // The registry says %SystemRoot%\System32; the launcher already had the
+    // expanded form. Comparing raw text would keep both and grow PATH each run.
+    const merged = mergeEnvironment(
+      [value('SystemRoot', 'C:\\Windows'), value('Path', '%SystemRoot%\\System32', true)],
+      [],
+      { PATH: 'C:\\Windows\\System32' },
+    )
+    expect(merged.env.PATH).toBe('C:\\Windows\\System32')
+  })
+
   it('leaves percent signs in a REG_SZ PATH untouched', () => {
     const merged = mergeEnvironment(
       [value('SystemRoot', 'C:\\Windows'), value('Path', '%SystemRoot%\\x', false)],

@@ -1080,18 +1080,14 @@ export function mergeEnvironment(
     value.replace(/%([^%]+)%/g, (whole, name: string) => lookup(env, name) ?? whole)
 
   const pathParts: Array<{ text: string; expand: boolean }> = []
-  const seenPath = new Set<string>()
-  const toExpand: string[] = []
+  // Keyed by lower-case name so a later value REPLACES the earlier flag: if the
+  // user redefines a machine REG_EXPAND_SZ as REG_SZ, the winner's type decides,
+  // not a flag accumulated from the loser.
+  const expandFlags = new Map<string, boolean>()
   let sawRegistry = false
   const env: Record<string, string> = {}
   const addPath = (text: string, expand: boolean): void => {
-    // Deduped across both keys: the inherited PATH already contains what the
-    // LAST restart composed, so appending without this grows it on every restart.
-    for (const part of text.split(';').filter(Boolean)) {
-      if (seenPath.has(part.toLowerCase())) continue
-      seenPath.add(part.toLowerCase())
-      pathParts.push({ text: part, expand })
-    }
+    for (const part of text.split(';').filter(Boolean)) pathParts.push({ text: part, expand })
   }
   for (const source of [machine, user]) {
     for (const entry of source) {
@@ -1105,7 +1101,7 @@ export function mergeEnvironment(
         continue
       }
       assign(env, entry.name, entry.value)
-      if (entry.expand) toExpand.push(entry.name)
+      expandFlags.set(entry.name.toLowerCase(), entry.expand)
     }
   }
   // Registry PATH entries lead, then whatever the inherited PATH had that the
@@ -1125,18 +1121,29 @@ export function mergeEnvironment(
     assign(env, name, value)
   }
   // Expansion runs on the COMPOSED block, so a REG_EXPAND_SZ value can reference
-  // a name that a later-read key defines. Only flagged values are touched: a
-  // REG_SZ value keeps its literal percent signs, as Windows leaves them.
-  for (const name of toExpand) {
-    const key = Object.keys(env).find(candidate => candidate.toLowerCase() === name.toLowerCase())
+  // a name that a later-read key defines. The flag comes from the value that WON:
+  // a REG_SZ user value shadowing a REG_EXPAND_SZ machine value keeps its literal
+  // percent signs, as Windows leaves them.
+  for (const [lower, expand] of expandFlags) {
+    if (!expand) continue
+    const key = Object.keys(env).find(candidate => candidate.toLowerCase() === lower)
     const current = key === undefined ? undefined : env[key]
     if (key === undefined || current === undefined) continue
     env[key] = expandValue(current, env)
   }
   if (pathParts.length > 0) {
-    assign(env, 'PATH', pathParts
-      .map(part => (part.expand ? expandValue(part.text, env) : part.text))
-      .join(';'))
+    // Expanded first, deduped after: the registry's %SystemRoot%\System32 and an
+    // inherited C:\Windows\System32 are the same directory, and comparing the
+    // unexpanded text would keep both and grow PATH on every restart.
+    const ordered: string[] = []
+    const seen = new Set<string>()
+    for (const part of pathParts) {
+      const text = part.expand ? expandValue(part.text, env) : part.text
+      if (seen.has(text.toLowerCase())) continue
+      seen.add(text.toLowerCase())
+      ordered.push(text)
+    }
+    assign(env, 'PATH', ordered.join(';'))
   }
   return { env, source: 'registry' }
 }
