@@ -1,6 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -458,6 +458,10 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       const seen = readFileSync(dumpFile, 'utf8')
       expect(seen).toBe(fresh)
       expect(seen).not.toBe(stale)
+      // The registry export carries the whole environment; it must not outlive
+      // the read that needed it.
+      expect(readdirSync(rig.home).filter(entry => entry.startsWith('env-') && entry.endsWith('.reg')))
+        .toEqual([])
     } finally {
       killPid(rig.old.pid)
       killPid(newPid)

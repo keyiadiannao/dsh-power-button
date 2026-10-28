@@ -1079,31 +1079,29 @@ export function mergeEnvironment(
   const expandValue = (value: string, env: Record<string, string>): string =>
     value.replace(/%([^%]+)%/g, (whole, name: string) => lookup(env, name) ?? whole)
 
-  const pathParts: string[] = []
+  const pathParts: Array<{ text: string; expand: boolean }> = []
   const seenPath = new Set<string>()
   const toExpand: string[] = []
-  let pathNeedsExpand = false
   let sawRegistry = false
   const env: Record<string, string> = {}
-  const addPath = (text: string): void => {
+  const addPath = (text: string, expand: boolean): void => {
     // Deduped across both keys: the inherited PATH already contains what the
     // LAST restart composed, so appending without this grows it on every restart.
     for (const part of text.split(';').filter(Boolean)) {
       if (seenPath.has(part.toLowerCase())) continue
       seenPath.add(part.toLowerCase())
-      pathParts.push(part)
+      pathParts.push({ text: part, expand })
     }
   }
   for (const source of [machine, user]) {
     for (const entry of source) {
       sawRegistry = true
       if (entry.name.toLowerCase() === 'path') {
-        // PATH is deleted into parts rather than assigned, so it cannot ride the
-        // generic expansion below; it needs it as much as anything: real entries
-        // are written as %SystemRoot%\System32 and a caller-supplied block is not
-        // expanded by CreateProcess.
-        if (entry.expand) pathNeedsExpand = true
-        addPath(entry.value)
+        // Per-segment: PATH is assembled from parts rather than assigned, so it
+        // cannot ride the generic pass below — and the two halves can disagree.
+        // Expanding the joined string would resolve a REG_SZ half's literals
+        // because the other half needed it.
+        addPath(entry.value, entry.expand)
         continue
       }
       assign(env, entry.name, entry.value)
@@ -1114,8 +1112,7 @@ export function mergeEnvironment(
   // registry does not: pnpm and tsx prepend node_modules/.bin to the launcher's
   // PATH, and dropping those would break every child resolving a binary by name.
   const inheritedPath = Object.keys(inherited).find(key => key.toLowerCase() === 'path')
-  if (inheritedPath !== undefined) addPath(String(inherited[inheritedPath] ?? ''))
-  if (pathParts.length > 0) assign(env, 'PATH', pathParts.join(';'))
+  if (inheritedPath !== undefined) addPath(String(inherited[inheritedPath] ?? ''), false)
   if (!sawRegistry) {
     for (const [name, value] of Object.entries(inherited)) {
       if (typeof value === 'string') assign(env, name, value)
@@ -1136,10 +1133,10 @@ export function mergeEnvironment(
     if (key === undefined || current === undefined) continue
     env[key] = expandValue(current, env)
   }
-  if (pathNeedsExpand) {
-    const key = Object.keys(env).find(candidate => candidate.toLowerCase() === 'path')
-    const current = key === undefined ? undefined : env[key]
-    if (key !== undefined && current !== undefined) env[key] = expandValue(current, env)
+  if (pathParts.length > 0) {
+    assign(env, 'PATH', pathParts
+      .map(part => (part.expand ? expandValue(part.text, env) : part.text))
+      .join(';'))
   }
   return { env, source: 'registry' }
 }
@@ -1199,8 +1196,11 @@ function readEnvKey(keyPath) {
   const file = nodePath.join(nodePath.dirname(LOG),
     'env-' + process.pid + '-' + Math.random().toString(36).slice(2) + '.reg');
   try {
-    // Created first with a restrictive mode so reg export's overwrite keeps this
-    // file's ACL instead of whatever the directory would hand a new file.
+    // Created first so reg export's overwrite reuses this file. The mode is NOT
+    // a privacy guarantee on Windows: NTFS ACLs decide read access, and this file
+    // inherits the harness home's ACL — the same directory that holds
+    // .credentials.yaml. It is unlinked in the same call, and residue left by a
+    // killed helper is pruned at the next boot.
     try { fs.closeSync(fs.openSync(file, 'w', 0o600)) } catch {}
     execFileSync('reg', ['export', keyPath, file, '/y'], { windowsHide: true, stdio: 'ignore' });
     const raw = fs.readFileSync(file);

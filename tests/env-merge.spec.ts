@@ -150,6 +150,18 @@ describe('mergeEnvironment', () => {
     expect(merged.env.PATH).toBe('C:\\Windows\\System32;C:\\Users\\me\\AppData')
   })
 
+  it('expands only the PATH half that was REG_EXPAND_SZ', () => {
+    // A mixed PATH: machine entries reference %SystemRoot% and must be expanded;
+    // the user entries are REG_SZ and keep their percent signs, as Windows leaves
+    // them. Expanding the joined string would resolve both halves.
+    const merged = mergeEnvironment(
+      [value('SystemRoot', 'C:\\Windows'), value('Path', '%SystemRoot%\\System32', true)],
+      [value('Path', '%CUSTOM%\\literal', false)],
+      {},
+    )
+    expect(merged.env.PATH).toBe('C:\\Windows\\System32;%CUSTOM%\\literal')
+  })
+
   it('leaves percent signs in a REG_SZ PATH untouched', () => {
     const merged = mergeEnvironment(
       [value('SystemRoot', 'C:\\Windows'), value('Path', '%SystemRoot%\\x', false)],
