@@ -733,10 +733,56 @@ const HELPER_ARM_TIMEOUT_MS = 5_000
 const HELPER_COMMIT_TIMEOUT_MS = 5_000
 /** How long the generated helper waits for the Host's COMMIT before abandoning. */
 const HELPER_COMMIT_WAIT_MS = 30_000
-/** How long the generated helper waits for the relaunched DSH to answer /health. */
-const HELPER_READY_WAIT_MS = 60_000
+/**
+ * How long the generated helper waits for the relaunched DSH to answer /health
+ * AND prove it claimed this restart.
+ *
+ * Measured on a cold Windows start of a full profile: 57s once, 72s another time,
+ * against a 60s window that therefore reported a real success as a health timeout.
+ * The helper polls, so a fast boot costs nothing extra here; the only price of a
+ * longer window is that a genuinely dead successor is reported later.
+ */
+const HELPER_READY_WAIT_MS = 180_000
 /** Schema version of the handshake status records (not the marker's). */
 const RESTART_SCHEMA_VERSION = 2
+
+/**
+ * Reconcile a restart claim that arrived after the helper gave up waiting.
+ *
+ * The helper stops polling at its window and records `failed`; a slow boot can
+ * still claim the restart afterwards, which means the process is demonstrably the
+ * successor while the record says the restart failed. Rewriting only that
+ * contradiction keeps the record honest — the helper's failure code stays, because
+ * it explains WHY the claim was late.
+ * @param port - the port whose last-restart record to reconcile.
+ * @param restartId - the restart this process claimed.
+ * @returns true when a record was rewritten.
+ */
+export function reconcileLateRestartClaim(port: number, restartId: string): boolean {
+  const file = lastRestartPath(port)
+  const record = readJsonFile(file)
+  if (record === null) return false
+  if (record['restartId'] !== restartId) return false
+  if (record['stage'] !== 'failed') return false
+  const failure = record['failure']
+  const code = typeof failure === 'object' && failure !== null
+    ? (failure as { code?: unknown })['code']
+    : undefined
+  record['stage'] = 'ready'
+  record['resolvedByLateClaim'] = true
+  record['resolvedAt'] = new Date().toISOString()
+  try {
+    fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 })
+  } catch {
+    return false
+  }
+  try {
+    appendLog(LOG_FILE, `${new Date().toISOString()} restart claim arrived after the helper gave up`
+      + ` (${typeof code === 'string' ? code : 'unknown'}); record updated to ready`
+      + ` restartId=${restartId}\n`)
+  } catch { /* a log that cannot be written must not change the outcome */ }
+  return true
+}
 
 /**
  * Upper bound on the best-effort pre-exit session flush.
@@ -2011,6 +2057,10 @@ export function apply(ctx: any, config: Config) {
   bootRestart = consumeRestartConfirmation()
   restartNoticePending = bootRestart !== null
   if (bootRestart !== null) {
+    // A claim that lands after the helper's window turns a recorded failure into
+    // a success it actually was; reconcile before the toast and the notice read
+    // the record.
+    if (bootRestart.restartId !== undefined) reconcileLateRestartClaim(CURRENT_PORT, bootRestart.restartId)
     try {
       appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${bootRestart.fromInstanceId}`
         + (bootRestart.restartId !== undefined ? ` restartId=${bootRestart.restartId}` : '')

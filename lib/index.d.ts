@@ -222,6 +222,19 @@ declare function requestAppExit(ctx: any, fallbackExit?: () => void, watchdogMs?
  * Best-effort, never throws. */
 declare function pruneOldRestartLogs(maxAgeDays?: number): void;
 /**
+ * Reconcile a restart claim that arrived after the helper gave up waiting.
+ *
+ * The helper stops polling at its window and records `failed`; a slow boot can
+ * still claim the restart afterwards, which means the process is demonstrably the
+ * successor while the record says the restart failed. Rewriting only that
+ * contradiction keeps the record honest — the helper's failure code stays, because
+ * it explains WHY the claim was late.
+ * @param port - the port whose last-restart record to reconcile.
+ * @param restartId - the restart this process claimed.
+ * @returns true when a record was rewritten.
+ */
+declare function reconcileLateRestartClaim(port: number, restartId: string): boolean;
+/**
  * Upper bound on the best-effort pre-exit session flush.
  *
  * The flush is a durability nicety — `ctx.appExit` disposal is the authority —
@@ -506,4 +519,4 @@ declare function connectionRejection(ctx: any, req: {
 }): 401 | 403 | undefined | null;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
