@@ -410,7 +410,9 @@ type PowerTrustRejectReason = 'socket-not-loopback' | 'host-missing' | 'host-unp
 /** The deployment's own fence refused. Its rules are the host's, not ours. */
 'host-fence' |
 /** The deployment admitted the request; its browser authentication did not. */
-'not-authenticated';
+'not-authenticated' |
+/** The deployment's browser-trust check exists but failed to answer. */
+'host-check-failed';
 /**
  * Decide trust and say which rule decided it.
  *
@@ -500,6 +502,31 @@ declare function isTrustedPowerRequest(req: {
  * keeps the strict socket rule rather than silently relaxing it. */
 declare function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0';
 /**
+ * What the deployment's own fence decided, kept apart from "it is not there".
+ *
+ * `failed` is deliberately not merged into `absent`: falling back to this plugin's
+ * own rules when the deployment's check breaks would silently drop its browser
+ * authentication, leaving origin rules that never authenticated anyone.
+ */
+type HostFenceVerdict =
+/** No `connection` service: only this plugin's own fence can decide. */
+{
+  kind: 'absent';
+} |
+/** The deployment checked the request and let it through, authentication included. */
+{
+  kind: 'admitted';
+} |
+/** The deployment refused it; forward the status it chose. */
+{
+  kind: 'refused';
+  status: 401 | 403;
+} |
+/** The deployment has the check but it threw or answered outside its contract. */
+{
+  kind: 'failed';
+};
+/**
  * Apply the deployment's own browser-trust fence and browser authentication.
  *
  * This plugin's route is longer than the host's `/api` prefix, so longest-prefix
@@ -511,12 +538,12 @@ declare function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0';
  * taken from it wherever it exists.
  * @param ctx - host context.
  * @param req - the incoming request.
- * @returns the status the deployment refused with, `undefined` when it admitted
- * the request, or `null` when the host exposes no connection service.
+ * @returns which authority decided: the deployment refused, admitted, was absent,
+ * or has the check but could not answer.
  */
 declare function connectionRejection(ctx: any, req: {
   headers: Record<string, unknown>;
-}): 401 | 403 | undefined | null;
+}): HostFenceVerdict;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, HostFenceVerdict, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
