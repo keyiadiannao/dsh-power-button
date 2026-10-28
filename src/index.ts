@@ -31,6 +31,11 @@
  *     port this process actually bound, so the successor lands where the helper
  *     is waiting. The old process self-exits after a short delay so the HTTP
  *     response flushes.
+ *   - The successor's environment is re-read from the registry (user + machine)
+ *     instead of inherited. A process environment is a launcher-time snapshot,
+ *     so inheriting it replays values the user has since changed with setx or
+ *     System Properties, and the restarted instance looks identical to the old
+ *     one — the reported "environment inheritance" defect.
  *   - No taskkill /T /F (it walks the parent-child chain and kills the helper),
  *     no PowerShell (window popup + quoting traps).
  *
@@ -661,14 +666,14 @@ export function requestAppExit(
 export function pruneOldRestartLogs(maxAgeDays = 7): void {
   const cutoff = Date.now() - maxAgeDays * 24 * 3600 * 1000
 
-  const prune = (dir: string, claims: (name: string) => boolean): void => {
+  const prune = (dir: string, claims: (name: string) => boolean, olderThan = cutoff): void => {
     let names: string[]
     try { names = fs.readdirSync(dir) } catch { return }
     for (const name of names) {
       if (!claims(name)) continue
       const full = path.join(dir, name)
       try {
-        if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full)
+        if (fs.statSync(full).mtimeMs < olderThan) fs.unlinkSync(full)
       } catch { /* ignore */ }
     }
   }
@@ -676,6 +681,11 @@ export function pruneOldRestartLogs(maxAgeDays = 7): void {
   prune(RUNTIME_DIR, (name) =>
     (name.startsWith('restart-helper-') && name.endsWith('.log'))
     || (name.startsWith('dsh-restart-helper-') && name.endsWith('.cjs')))
+  // A killed helper can leave its registry export behind. It is valid for the
+  // milliseconds the helper reads it, so anything older than an hour is residue
+  // — and it carries the environment, so it does not wait the full retention.
+  prune(RUNTIME_DIR, (name) => name.startsWith('env-') && name.endsWith('.reg'),
+    Date.now() - 60 * 60 * 1000)
   prune(restartDir(), (name) => name.endsWith('.status.json') || name.endsWith('.commit.json'))
   // A notice whose session never comes back would otherwise wait forever and
   // then describe a restart that is long irrelevant.
@@ -723,10 +733,56 @@ const HELPER_ARM_TIMEOUT_MS = 5_000
 const HELPER_COMMIT_TIMEOUT_MS = 5_000
 /** How long the generated helper waits for the Host's COMMIT before abandoning. */
 const HELPER_COMMIT_WAIT_MS = 30_000
-/** How long the generated helper waits for the relaunched DSH to answer /health. */
-const HELPER_READY_WAIT_MS = 60_000
+/**
+ * How long the generated helper waits for the relaunched DSH to answer /health
+ * AND prove it claimed this restart.
+ *
+ * Measured on a cold Windows start of a full profile: 57s once, 72s another time,
+ * against a 60s window that therefore reported a real success as a health timeout.
+ * The helper polls, so a fast boot costs nothing extra here; the only price of a
+ * longer window is that a genuinely dead successor is reported later.
+ */
+const HELPER_READY_WAIT_MS = 180_000
 /** Schema version of the handshake status records (not the marker's). */
 const RESTART_SCHEMA_VERSION = 2
+
+/**
+ * Reconcile a restart claim that arrived after the helper gave up waiting.
+ *
+ * The helper stops polling at its window and records `failed`; a slow boot can
+ * still claim the restart afterwards, which means the process is demonstrably the
+ * successor while the record says the restart failed. Rewriting only that
+ * contradiction keeps the record honest — the helper's failure code stays, because
+ * it explains WHY the claim was late.
+ * @param port - the port whose last-restart record to reconcile.
+ * @param restartId - the restart this process claimed.
+ * @returns true when a record was rewritten.
+ */
+export function reconcileLateRestartClaim(port: number, restartId: string): boolean {
+  const file = lastRestartPath(port)
+  const record = readJsonFile(file)
+  if (record === null) return false
+  if (record['restartId'] !== restartId) return false
+  if (record['stage'] !== 'failed') return false
+  const failure = record['failure']
+  const code = typeof failure === 'object' && failure !== null
+    ? (failure as { code?: unknown })['code']
+    : undefined
+  record['stage'] = 'ready'
+  record['resolvedByLateClaim'] = true
+  record['resolvedAt'] = new Date().toISOString()
+  try {
+    fs.writeFileSync(file, JSON.stringify(record), { mode: 0o600 })
+  } catch {
+    return false
+  }
+  try {
+    appendLog(LOG_FILE, `${new Date().toISOString()} restart claim arrived after the helper gave up`
+      + ` (${typeof code === 'string' ? code : 'unknown'}); record updated to ready`
+      + ` restartId=${restartId}\n`)
+  } catch { /* a log that cannot be written must not change the outcome */ }
+  return true
+}
 
 /**
  * Upper bound on the best-effort pre-exit session flush.
@@ -976,6 +1032,169 @@ export interface RestartHelperPayload {
   origin?: RestartOrigin
 }
 
+/** One value read from an environment registry key. */
+export interface EnvRegistryValue {
+  /** Case preserved as stored; comparisons are case-insensitive. */
+  name: string
+  value: string
+  /** REG_EXPAND_SZ: the value still contains `%NAME%` references to expand. */
+  expand: boolean
+}
+
+/**
+ * Parse the `.reg` export of an environment key.
+ *
+ * `reg export` is the lossless read: it writes UTF-16LE, so a value survives
+ * whatever the console code page can represent. `reg query` renders to the code
+ * page and substitutes `?` for glyphs it lacks, which no decoder can undo.
+ * Only the two string types mean anything in an environment block: REG_SZ is
+ * quoted, REG_EXPAND_SZ is `hex(2)`. A value whose hex payload is malformed is
+ * dropped instead of partially decoded — a half-decoded string is worse than a
+ * missing one, because the caller then falls back to the inherited value.
+ * @param text - the decoded `.reg` file.
+ * @returns every parsable value in the key, in file order.
+ */
+export function parseEnvRegExport(text: string): EnvRegistryValue[] {
+  const out: EnvRegistryValue[] = []
+  const unquote = (s: string): string => s.replace(/\\(.)/g, '$1')
+  /** `hex(2)` payload: comma-separated bytes holding UTF-16LE text, or null. */
+  const utf16FromHex = (list: string): string | null => {
+    // No empty tokens are tolerated, including a doubled comma: after unfolding a
+    // continuation there is never one, so an empty token means the export was
+    // mis-joined and decoding it would build a plausible value from wrong bytes.
+    const tokens = list.split(',')
+    if (tokens.length === 0) return null
+    if (tokens.some(token => !/^[0-9a-f]{2}$/i.test(token))) return null
+    if (tokens.length % 2 !== 0) return null
+    return Buffer.from(tokens.map(token => Number.parseInt(token, 16)))
+      .toString('utf16le').replace(/\u0000+$/, '')
+  }
+  // A long value is wrapped: the line ends with a single backslash and the next
+  // line continues it, indented. Joining first is what keeps a long PATH from
+  // being truncated to its first line — and a real PATH is both long and stored
+  // as REG_EXPAND_SZ, so it always takes this shape.
+  const unfolded = text.replace(/\\\r?\n[ \t]*/g, '')
+  for (const rawLine of unfolded.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    const entry = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line)
+    if (entry === null) continue
+    const name = unquote(entry[1] ?? '')
+    const rhs = entry[2] ?? ''
+    const hex = /^hex\(2\):(.*)$/.exec(rhs)
+    if (hex !== null) {
+      const value = utf16FromHex(hex[1] ?? '')
+      if (value !== null) out.push({ name, value, expand: true })
+      continue
+    }
+    const str = /^"(.*)"$/.exec(rhs)
+    // Anything else — hex(7) MULTI_SZ, hex: binary, dword: — has no meaning in an
+    // environment block, so it is ignored rather than guessed at.
+    if (str !== null) out.push({ name, value: unquote(str[1] ?? ''), expand: false })
+  }
+  return out
+}
+
+/**
+ * Build the environment block a newly started process would receive.
+ *
+ * Windows composes the block in stages — machine values first, then user values
+ * which shadow them — and a REG_EXPAND_SZ value is resolved against the block as
+ * it stands at ITS stage, so a machine value cannot see a user-only name. `PATH`
+ * is the exception to assignment: both halves are kept, machine first. Inherited
+ * values fill names the registry does not define and are never re-expanded, since
+ * they arrive with their references already resolved.
+ * @param machine - values from the HKLM session-manager key.
+ * @param user - values from HKCU\Environment.
+ * @param inherited - this process's own environment, used only where the
+ * registry defines nothing, and to complete `PATH`.
+ * @returns the composed block plus where it came from.
+ */
+export function mergeEnvironment(
+  machine: readonly EnvRegistryValue[],
+  user: readonly EnvRegistryValue[],
+  inherited: Record<string, string | undefined>,
+): { env: Record<string, string>; source: 'registry' | 'inherited' } {
+  // One lower-case index over the composed block: Windows treats names
+  // case-insensitively, and every read and write goes through it so an existing
+  // spelling is replaced rather than joined by a second one.
+  const env: Record<string, string> = {}
+  const index = new Map<string, string>()
+  const set = (name: string, value: string): void => {
+    const lower = name.toLowerCase()
+    const existing = index.get(lower)
+    if (existing !== undefined && existing !== name) delete env[existing]
+    env[name] = value
+    index.set(lower, name)
+  }
+  const get = (name: string): string | undefined => {
+    const key = index.get(name.toLowerCase())
+    return key === undefined ? undefined : env[key]
+  }
+  const expandValue = (value: string): string =>
+    value.replace(/%([^%]+)%/g, (whole, name: string) => get(name) ?? whole)
+
+  const pathParts: string[] = []
+  /** Apply one stage: assign, expand that stage's own values, then its PATH parts. */
+  const applyStage = (entries: readonly EnvRegistryValue[]): void => {
+    const pending: string[] = []
+    const stageParts: Array<{ text: string; expand: boolean }> = []
+    for (const entry of entries) {
+      if (entry.name.toLowerCase() === 'path') {
+        for (const part of entry.value.split(';').filter(Boolean)) {
+          stageParts.push({ text: part, expand: entry.expand })
+        }
+        continue
+      }
+      set(entry.name, entry.value)
+      if (entry.expand) pending.push(entry.name)
+    }
+    // Expansion is per stage, so a machine value cannot resolve a user-only name.
+    for (const name of pending) {
+      const current = get(name)
+      if (current !== undefined) set(name, expandValue(current))
+    }
+    // PATH is assembled from parts rather than assigned, and the two halves can
+    // disagree on type, so each part is expanded according to its own source.
+    for (const part of stageParts) pathParts.push(part.expand ? expandValue(part.text) : part.text)
+  }
+  // The inherited block is the base layer, not a last-resort fill: some names a
+  // registry value references exist ONLY in the process block — SystemRoot is
+  // absent from both environment keys on a real machine — so expanding without it
+  // would leave %SystemRoot% literal in a machine PATH forever. Machine and user
+  // values then shadow this layer, which keeps the stage isolation intact.
+  for (const [name, value] of Object.entries(inherited)) {
+    if (typeof value === 'string') set(name, value)
+  }
+  if (machine.length === 0 && user.length === 0) return { env, source: 'inherited' }
+
+  applyStage(machine)
+  applyStage(user)
+
+  // Registry PATH entries lead, then whatever the inherited PATH had that the
+  // registry does not: pnpm and tsx prepend node_modules/.bin to the launcher's
+  // PATH, and dropping those would break every child resolving a binary by name.
+  const inheritedPath = Object.keys(inherited).find(key => key.toLowerCase() === 'path')
+  if (inheritedPath !== undefined) {
+    for (const part of String(inherited[inheritedPath] ?? '').split(';').filter(Boolean)) {
+      pathParts.push(part)
+    }
+  }
+  if (pathParts.length > 0) {
+    // Deduped after expansion: the registry's %SystemRoot%\System32 and an
+    // inherited C:\Windows\System32 are the same directory, and comparing raw
+    // text would keep both and grow PATH on every restart.
+    const ordered: string[] = []
+    const seen = new Set<string>()
+    for (const part of pathParts) {
+      if (seen.has(part.toLowerCase())) continue
+      seen.add(part.toLowerCase())
+      ordered.push(part)
+    }
+    set('PATH', ordered.join(';'))
+  }
+  return { env, source: 'registry' }
+}
+
 /**
  * Generate the detached restart helper. A pure function of the payload: the
  * runtime acceptance tests execute its output directly, so what the E2E
@@ -983,7 +1202,7 @@ export interface RestartHelperPayload {
  */
 export function buildRestartHelper(p: RestartHelperPayload): string {
   return `
-const { spawn } = require('node:child_process');
+const { spawn, execFileSync } = require('node:child_process');
 const net = require('node:net');
 const http = require('node:http');
 const fs = require('node:fs');
@@ -1011,6 +1230,65 @@ const REQUESTED_AT = ${JSON.stringify(p.requestedAt)};
 const ORIGIN = ${JSON.stringify(p.origin ?? null)};
 function log(m) {
   try { fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\\n'); } catch {}
+}
+// The successor must start from the CURRENT OS environment. A process
+// environment is a snapshot captured when its launcher started, so inheriting
+// this helper's copy would replay values the user has since changed (setx,
+// System Properties, an installer). Re-read it from the registry instead.
+const ENV_KEYS = {
+  machine: 'HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Environment',
+  user: 'HKCU\\\\Environment',
+};
+const parseEnvRegExport = ${parseEnvRegExport.toString()};
+const mergeEnvironment = ${mergeEnvironment.toString()};
+function readEnvKey(keyPath) {
+  // 'reg export' writes UTF-16LE, so a value survives whatever the console code
+  // page can represent. 'reg query' renders to the code page and substitutes
+  // '?' for glyphs it lacks, which no decoder can undo. The export file carries
+  // the environment, so it lives beside the helper in the 0700 runtime dir and
+  // is removed in the same call.
+  const file = nodePath.join(nodePath.dirname(LOG),
+    'env-' + process.pid + '-' + Math.random().toString(36).slice(2) + '.reg');
+  try {
+    // Created first so reg export's overwrite reuses this file. The mode is NOT
+    // a privacy guarantee on Windows: NTFS ACLs decide read access, and this file
+    // inherits the harness home's ACL — the same directory that holds
+    // .credentials.yaml. It is unlinked in the same call, and residue left by a
+    // killed helper is pruned at the next boot.
+    try { fs.closeSync(fs.openSync(file, 'w', 0o600)) } catch {}
+    execFileSync('reg', ['export', keyPath, file, '/y'], { windowsHide: true, stdio: 'ignore' });
+    const raw = fs.readFileSync(file);
+    const text = raw.length > 1 && raw[0] === 0xff && raw[1] === 0xfe
+      ? raw.subarray(2).toString('utf16le')
+      : raw.toString('utf8');
+    return parseEnvRegExport(text);
+  } catch {
+    return null;
+  } finally {
+    try { fs.unlinkSync(file); } catch {}
+  }
+}
+function freshEnv() {
+  const inherited = {};
+  for (const name of Object.keys(process.env)) {
+    if (typeof process.env[name] === 'string') inherited[name] = process.env[name];
+  }
+  if (process.platform !== 'win32') return { env: inherited, source: 'inherited' };
+  const machine = readEnvKey(ENV_KEYS.machine);
+  const user = readEnvKey(ENV_KEYS.user);
+  if (machine === null && user === null) {
+    log('environment refresh: registry unreadable, inheriting the launcher block');
+    return { env: inherited, source: 'inherited' };
+  }
+  const merged = mergeEnvironment(
+    machine === null ? [] : machine,
+    user === null ? [] : user,
+    inherited,
+  );
+  log('environment refresh: source=' + merged.source
+    + ' machine=' + (machine === null ? 'unreadable' : machine.length + ' values')
+    + ' user=' + (user === null ? 'unreadable' : user.length + ' values'));
+  return merged;
 }
 function pidGone(pid) {
   try { process.kill(pid, 0); return false; } catch { return true; }
@@ -1139,13 +1417,29 @@ function sessionsQuiescent(maxWaitMs) {
     }
     return null;
   }
+  // Sampled once per restart, lazily: every attempt must launch with the same
+  // block, and re-reading the registry per attempt would cost two reg exports
+  // (and two temp files) each. Lives at helper scope because trySpawnOnce is not
+  // nested inside the run IIFE.
+  let launchEnv = null;
   async function trySpawnOnce(attempt) {
     patchStatus({ stage: 'launching', attempt: attempt });
+    if (launchEnv === null) {
+      launchEnv = Object.assign(freshEnv().env, { DSH_POWER_RESTART_ID: RESTART_ID });
+    }
     const out = fs.openSync(SERVER_LOG, 'a');
-    const child = spawn(relaunch[0], relaunch.slice(1), {
-      cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
-      env: Object.assign({}, process.env, { DSH_POWER_RESTART_ID: RESTART_ID }),
-    });
+    let child;
+    try {
+      child = spawn(relaunch[0], relaunch.slice(1), {
+        cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+        env: launchEnv,
+      });
+    } finally {
+      // The child holds its own duplicated handle; this parent-side one is only
+      // needed for the spawn call and would otherwise keep the log file open
+      // until the helper exits.
+      try { fs.closeSync(out); } catch {}
+    }
     const spawned = await new Promise((resolve) => {
       child.once('spawn', () => resolve(true));
       child.once('error', () => resolve(false));
@@ -1275,8 +1569,10 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
     // Replay the CURRENT invocation, portably (no hard-coded paths):
     // execArgv carries node flags (e.g. --import tsx/esm), argv the entry
-    // script + app args. Spawned children inherit env, so any NODE_OPTIONS
-    // that launched us is preserved too. The port is pinned to the one this
+    // script + app args. The helper inherits this process's environment, and
+    // the successor's own refresh uses it as the base: a NODE_OPTIONS that
+    // launched us survives while variables changed since then are overlaid
+    // from the registry. The port is pinned to the one this
     // process actually bound, so `--port 0` cannot hand the successor a
     // different port than the helper is waiting on and the marker is keyed by.
     const relaunchArgs = [
@@ -1760,6 +2056,10 @@ export function apply(ctx: any, config: Config) {
   bootRestart = consumeRestartConfirmation()
   restartNoticePending = bootRestart !== null
   if (bootRestart !== null) {
+    // A claim that lands after the helper's window turns a recorded failure into
+    // a success it actually was; reconcile before the toast and the notice read
+    // the record.
+    if (bootRestart.restartId !== undefined) reconcileLateRestartClaim(CURRENT_PORT, bootRestart.restartId)
     try {
       appendLog(LOG_FILE, `${new Date().toISOString()} restart confirmed: fromInstanceId=${bootRestart.fromInstanceId}`
         + (bootRestart.restartId !== undefined ? ` restartId=${bootRestart.restartId}` : '')

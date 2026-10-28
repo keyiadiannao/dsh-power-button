@@ -24,6 +24,13 @@ const PORT_FILE = argOf('--port-file')
 const MARKER = argOf('--marker')
 const INSTANCE_ID = argOf('--instance-id') ?? 'unknown-instance'
 const FORGET_RESTART = args.includes('--forget-restart')
+// The environment-refresh test needs to know what THIS process actually
+// inherited, which only the successor itself can report.
+const DUMP_ENV = argOf('--dump-env')
+const DUMP_ENV_FILE = argOf('--dump-env-file')
+if (DUMP_ENV !== undefined && DUMP_ENV_FILE !== undefined) {
+  try { fs.writeFileSync(DUMP_ENV_FILE, process.env[DUMP_ENV] ?? '', 'utf8') } catch { /* best-effort */ }
+}
 if (!Number.isInteger(PORT) || PORT < 0) {
   console.error('usage: node restart-target.cjs --port <n> [--port-file <path>] --instance-id <id>')
   process.exit(2)

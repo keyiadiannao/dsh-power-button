@@ -1,6 +1,6 @@
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -111,6 +111,9 @@ async function startRidge(opts: {
   /** Shorten the session-quiescence window so a still-moving log is reachable
    * inside a test instead of after fifteen seconds. */
   quiescenceWaitMs?: number
+  /** Extra arguments appended to the successor's argv (the environment test
+   * passes its dump flags through here). */
+  targetArgs?: string[]
 } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'dsh-power-e2e-'))
   const portFile = join(home, 'port.txt')
@@ -146,6 +149,7 @@ async function startRidge(opts: {
     ? [relaunchExec, TARGET, ...pinRelaunchPort(['--port', '0', '--instance-id', relaunchInstance], port), '--marker', markerFile]
     : [relaunchExec, TARGET, '--port', String(port), '--instance-id', relaunchInstance, '--marker', markerFile]
   if (opts.forgetRestart) relaunchArgs.push('--forget-restart')
+  if (opts.targetArgs !== undefined) relaunchArgs.push(...opts.targetArgs)
   writeFileSync(helperFile, buildRestartHelper({
     relaunch: relaunchArgs,
     cwd: home,
@@ -407,6 +411,140 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       expect(readFileSync(join(rig.home, 'helper.log'), 'utf8')).toContain('proceeding anyway')
     } finally {
       clearInterval(writer)
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('relaunches with the current OS environment, not the launcher snapshot', { timeout: 60_000 }, async () => {
+    // A process environment is a snapshot captured when its launcher started, so
+    // a variable changed with setx or System Properties AFTER DSH started never
+    // reached the relaunched instance: the "new" server came back identical to
+    // the old one. The helper re-reads the registry, so the successor must see
+    // the registry value even though every process in the chain inherits the
+    // stale one. This case is only meaningful on Windows, where that registry is
+    // the source of truth; elsewhere the helper deliberately keeps inheritance.
+    if (process.platform !== 'win32') return
+    const name = `DSH_POWER_ENV_PROBE_${randomUUID().replace(/-/g, '').slice(0, 12).toUpperCase()}`
+    const stale = 'stale-from-launcher'
+    const fresh = `fresh-${randomUUID()}`
+    const dumpDir = mkdtempSync(join(tmpdir(), 'dsh-power-env-'))
+    const dumpFile = join(dumpDir, 'env.txt')
+    execFileSync('reg', ['add', 'HKCU\\Environment', '/v', name, '/t', 'REG_SZ', '/d', fresh, '/f'], { windowsHide: true })
+    cleanups.push(() => {
+      try {
+        execFileSync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], { windowsHide: true })
+      } catch { /* already removed */ }
+      delete process.env[name]
+      rmSync(dumpDir, { recursive: true, force: true })
+    })
+    // Play the old DSH instance: the value every child in the chain inherits.
+    process.env[name] = stale
+    const rig = await startRidge({
+      targetArgs: ['--dump-env', name, '--dump-env-file', dumpFile],
+    })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 45_000)
+      expect(done?.stage).toBe('ready')
+      newPid = done?.newPid as number
+      // The successor reports what it actually inherited. Without the registry
+      // refresh this reads `stale` — the defect the issue describes.
+      const seen = readFileSync(dumpFile, 'utf8')
+      expect(seen).toBe(fresh)
+      expect(seen).not.toBe(stale)
+      // The registry export carries the whole environment; it must not outlive
+      // the read that needed it.
+      expect(readdirSync(rig.home).filter(entry => entry.startsWith('env-') && entry.endsWith('.reg')))
+        .toEqual([])
+    } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('carries a non-ASCII registry value through unchanged', { timeout: 60_000 }, async () => {
+    // reg.exe writes PIPED stdout in the OEM code page, so decoding its bytes as
+    // UTF-8 turned a Chinese value into replacement characters. The successor
+    // then received a corrupted variable — worse than the stale one this
+    // mechanism exists to replace — and the damage is invisible because the
+    // relaunch still reports ready.
+    if (process.platform !== 'win32') return
+    // No locale gate: the helper reads the registry through 'reg export', which
+    // writes UTF-16LE, so this must hold on an English Windows too — where
+    // 'reg query' would have substituted '?' for every glyph before any decoder
+    // ran. That substitution is exactly what this case exists to catch.
+    const name = `DSH_POWER_CJK_PROBE_${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`
+    const value = 'C:\\测试目录\\中文 路径'
+    const dumpDir = mkdtempSync(join(tmpdir(), 'dsh-power-cjk-'))
+    const dumpFile = join(dumpDir, 'env.txt')
+    execFileSync('reg', ['add', 'HKCU\\Environment', '/v', name, '/t', 'REG_SZ', '/d', value, '/f'],
+      { windowsHide: true })
+    cleanups.push(() => {
+      try {
+        execFileSync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], { windowsHide: true })
+      } catch { /* already removed */ }
+      rmSync(dumpDir, { recursive: true, force: true })
+    })
+    const rig = await startRidge({ targetArgs: ['--dump-env', name, '--dump-env-file', dumpFile] })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 45_000)
+      expect(done?.stage).toBe('ready')
+      newPid = done?.newPid as number
+      expect(readFileSync(dumpFile, 'utf8')).toBe(value)
+    } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
+
+  it('carries a long REG_EXPAND_SZ value with its references expanded', { timeout: 60_000 }, async () => {
+    // Two things at once, both only visible end to end: reg export wraps a long
+    // payload across continuation lines, and a caller-supplied block is not
+    // expanded by CreateProcess, so %SystemRoot% must be resolved by the helper.
+    if (process.platform !== 'win32') return
+    const name = `DSH_POWER_LONG_PROBE_${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`
+    const parts = Array.from({ length: 12 }, (_unused, i) => `%SystemRoot%\\dsh-probe-${i}`)
+    const stored = parts.join(';')
+    const systemRoot = process.env.SystemRoot ?? ''
+    const expected = parts.map(part => part.replace('%SystemRoot%', systemRoot)).join(';')
+    const dumpDir = mkdtempSync(join(tmpdir(), 'dsh-power-long-'))
+    const dumpFile = join(dumpDir, 'env.txt')
+    execFileSync('reg', ['add', 'HKCU\\Environment', '/v', name, '/t', 'REG_EXPAND_SZ', '/d', stored, '/f'],
+      { windowsHide: true })
+    cleanups.push(() => {
+      try {
+        execFileSync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], { windowsHide: true })
+      } catch { /* already removed */ }
+      rmSync(dumpDir, { recursive: true, force: true })
+    })
+    const rig = await startRidge({ targetArgs: ['--dump-env', name, '--dump-env-file', dumpFile] })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 45_000)
+      expect(done?.stage).toBe('ready')
+      newPid = done?.newPid as number
+      const seen = readFileSync(dumpFile, 'utf8')
+      // Truncation at the first continuation line would fail here, as would an
+      // unexpanded %SystemRoot%.
+      expect(seen).toBe(expected)
+    } finally {
       killPid(rig.old.pid)
       killPid(newPid)
       killPid(rig.helper.pid)

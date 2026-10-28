@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, utimesSync } from 'node:fs'
 import { join } from 'node:path'
 
 // DSH_HOME is set by tests/setup.ts BEFORE this module is imported, so
@@ -10,7 +10,8 @@ import {
   consumeRestartConfirmation, writeMarker, markerPath,
   redactCommandLine, clampModelDelayMs, pruneOldRestartLogs, requestAppExit,
   APP_EXIT_WATCHDOG_MS, PRE_EXIT_FLUSH_CAP_MS, preExitBudgetMs, helperOldPidWaitMs, flushSessionsBounded,
-  queueRestartNotice, deliverPendingNotices, restartStatus, Config, pinRelaunchPort, shutdownDsh,
+  queueRestartNotice, deliverPendingNotices, restartStatus, reconcileLateRestartClaim,
+  Config, pinRelaunchPort, shutdownDsh,
 } from '../src/index.ts'
 
 describe('shutdownDsh exit scheduling', () => {
@@ -772,5 +773,45 @@ describe('restartStatus', () => {
     const status = restartStatus(ctxForPort(31_993))
     expect(status).toEqual({ found: false })
     expect(JSON.parse(JSON.stringify(status))).toEqual(status)
+  })
+})
+
+describe('reconcileLateRestartClaim', () => {
+  // The helper stops polling at its readiness window and records `failed`; a slow
+  // boot can claim the restart afterwards. Measured on a full Windows profile:
+  // 57s once, 72s another time, against a window that was then 60s — so a real
+  // success was recorded as a timeout and the reader was pointed at a healthy
+  // process. The window is now 180s AND a late claim repairs the record.
+  const recordFile = (port: number): string => join(testHome, `dsh-power-restart-last-${port}.json`)
+  const failedRecord = (restartId: string): Record<string, unknown> => ({
+    schemaVersion: 2,
+    restartId,
+    port: 31_991,
+    oldPid: 1,
+    fromInstanceId: 'from-instance',
+    requestedAt: '2026-10-28T16:12:07.551Z',
+    stage: 'failed',
+    failure: { code: 'health-timeout', message: 'new process did not answer /health within 60000ms' },
+  })
+
+  it('turns a recorded failure into the success it actually was', () => {
+    writeFileSync(recordFile(31_991), JSON.stringify(failedRecord('rid-late')), 'utf8')
+    expect(reconcileLateRestartClaim(31_991, 'rid-late')).toBe(true)
+    const after = JSON.parse(readFileSync(recordFile(31_991), 'utf8')) as Record<string, unknown>
+    expect(after['stage']).toBe('ready')
+    expect(after['resolvedByLateClaim']).toBe(true)
+    // The helper's reason stays: it explains why the claim arrived late.
+    expect((after['failure'] as { code?: string }).code).toBe('health-timeout')
+  })
+
+  it('leaves another restart, an already-ready record and a missing file alone', () => {
+    writeFileSync(recordFile(31_992), JSON.stringify(failedRecord('rid-other')), 'utf8')
+    expect(reconcileLateRestartClaim(31_992, 'rid-different')).toBe(false)
+    expect(JSON.parse(readFileSync(recordFile(31_992), 'utf8'))['stage']).toBe('failed')
+
+    writeFileSync(recordFile(31_994), JSON.stringify({ ...failedRecord('rid-ready'), stage: 'ready' }), 'utf8')
+    expect(reconcileLateRestartClaim(31_994, 'rid-ready')).toBe(false)
+
+    expect(reconcileLateRestartClaim(31_995, 'rid-absent')).toBe(false)
   })
 })

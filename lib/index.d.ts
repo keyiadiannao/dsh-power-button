@@ -222,6 +222,19 @@ declare function requestAppExit(ctx: any, fallbackExit?: () => void, watchdogMs?
  * Best-effort, never throws. */
 declare function pruneOldRestartLogs(maxAgeDays?: number): void;
 /**
+ * Reconcile a restart claim that arrived after the helper gave up waiting.
+ *
+ * The helper stops polling at its window and records `failed`; a slow boot can
+ * still claim the restart afterwards, which means the process is demonstrably the
+ * successor while the record says the restart failed. Rewriting only that
+ * contradiction keeps the record honest — the helper's failure code stays, because
+ * it explains WHY the claim was late.
+ * @param port - the port whose last-restart record to reconcile.
+ * @param restartId - the restart this process claimed.
+ * @returns true when a record was rewritten.
+ */
+declare function reconcileLateRestartClaim(port: number, restartId: string): boolean;
+/**
  * Upper bound on the best-effort pre-exit session flush.
  *
  * The flush is a durability nicety — `ctx.appExit` disposal is the authority —
@@ -321,6 +334,47 @@ interface RestartHelperPayload {
    * guessing. Absent when the caller had no causal session. */
   origin?: RestartOrigin;
 }
+/** One value read from an environment registry key. */
+interface EnvRegistryValue {
+  /** Case preserved as stored; comparisons are case-insensitive. */
+  name: string;
+  value: string;
+  /** REG_EXPAND_SZ: the value still contains `%NAME%` references to expand. */
+  expand: boolean;
+}
+/**
+ * Parse the `.reg` export of an environment key.
+ *
+ * `reg export` is the lossless read: it writes UTF-16LE, so a value survives
+ * whatever the console code page can represent. `reg query` renders to the code
+ * page and substitutes `?` for glyphs it lacks, which no decoder can undo.
+ * Only the two string types mean anything in an environment block: REG_SZ is
+ * quoted, REG_EXPAND_SZ is `hex(2)`. A value whose hex payload is malformed is
+ * dropped instead of partially decoded — a half-decoded string is worse than a
+ * missing one, because the caller then falls back to the inherited value.
+ * @param text - the decoded `.reg` file.
+ * @returns every parsable value in the key, in file order.
+ */
+declare function parseEnvRegExport(text: string): EnvRegistryValue[];
+/**
+ * Build the environment block a newly started process would receive.
+ *
+ * Windows composes the block in stages — machine values first, then user values
+ * which shadow them — and a REG_EXPAND_SZ value is resolved against the block as
+ * it stands at ITS stage, so a machine value cannot see a user-only name. `PATH`
+ * is the exception to assignment: both halves are kept, machine first. Inherited
+ * values fill names the registry does not define and are never re-expanded, since
+ * they arrive with their references already resolved.
+ * @param machine - values from the HKLM session-manager key.
+ * @param user - values from HKCU\Environment.
+ * @param inherited - this process's own environment, used only where the
+ * registry defines nothing, and to complete `PATH`.
+ * @returns the composed block plus where it came from.
+ */
+declare function mergeEnvironment(machine: readonly EnvRegistryValue[], user: readonly EnvRegistryValue[], inherited: Record<string, string | undefined>): {
+  env: Record<string, string>;
+  source: 'registry' | 'inherited';
+};
 /**
  * Generate the detached restart helper. A pure function of the payload: the
  * runtime acceptance tests execute its output directly, so what the E2E
@@ -465,4 +519,4 @@ declare function connectionRejection(ctx: any, req: {
 }): 401 | 403 | undefined | null;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
