@@ -90,6 +90,7 @@ Four invariants hold this together:
 - Success is confirmed by a per-process `instanceId` that must **change**, so a brief outage never fakes it.
 - The launcher's exit channel is read at `ctx.get('appExit')`, never as a property: it is an optional host service this plugin does not inject, and a property read resolves to `undefined` — which would skip graceful disposal and hard-kill instead.
 - Exit is bounded end to end, and the bounds are **derived rather than duplicated**: graceful exit gets a 15 s watchdog, the pre-exit flush cap is 5 s, and the helper's patience for the old PID is computed from both, so they cannot drift into the helper giving up first.
+- The successor's environment is **re-read from the registry**, not inherited: a process environment is a snapshot from its launcher, so a variable changed with `setx` or System Properties would otherwise never reach the relaunched instance. Values are decoded with the OS code page, so non-ASCII entries survive. A variable **deleted** from the registry still cannot be seen, and non-Windows platforms keep plain inheritance.
 
 Shutdown posts `/api/dsh-power-button/shutdown` and stops without relaunching. It is irreversible, so the button and `/shutdown` both open a confirm dialog; the model is never given shutdown.
 

@@ -464,4 +464,41 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       killPid(rig.helper.pid)
     }
   })
+
+  it('carries a non-ASCII registry value through unchanged', { timeout: 60_000 }, async () => {
+    // reg.exe writes PIPED stdout in the OEM code page, so decoding its bytes as
+    // UTF-8 turned a Chinese value into replacement characters. The successor
+    // then received a corrupted variable — worse than the stale one this
+    // mechanism exists to replace — and the damage is invisible because the
+    // relaunch still reports ready.
+    if (process.platform !== 'win32') return
+    const name = `DSH_POWER_CJK_PROBE_${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`
+    const value = 'C:\\测试目录\\中文 路径'
+    const dumpDir = mkdtempSync(join(tmpdir(), 'dsh-power-cjk-'))
+    const dumpFile = join(dumpDir, 'env.txt')
+    execFileSync('reg', ['add', 'HKCU\\Environment', '/v', name, '/t', 'REG_SZ', '/d', value, '/f'],
+      { windowsHide: true })
+    cleanups.push(() => {
+      try {
+        execFileSync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], { windowsHide: true })
+      } catch { /* already removed */ }
+      rmSync(dumpDir, { recursive: true, force: true })
+    })
+    const rig = await startRidge({ targetArgs: ['--dump-env', name, '--dump-env-file', dumpFile] })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 45_000)
+      expect(done?.stage).toBe('ready')
+      newPid = done?.newPid as number
+      expect(readFileSync(dumpFile, 'utf8')).toBe(value)
+    } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
 })

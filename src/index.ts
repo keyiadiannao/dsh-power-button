@@ -1028,17 +1028,49 @@ const ENV_KEY_PATHS = [
   'HKCU\\\\Environment',
   'HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Environment',
 ];
+// reg.exe encodes its PIPED stdout with the OEM code page, and a pipe has no
+// console, so a chcp cannot change it. Decoding those bytes as UTF-8 mangles
+// every non-ASCII value: a Chinese PATH entry would reach the successor as
+// replacement characters, which is worse than the stale value this mechanism
+// exists to fix. Decode strictly first and widen only on failure.
+const OEM_LABELS = {
+  866: 'ibm866', 874: 'windows-874', 932: 'shift_jis', 936: 'gbk',
+  949: 'euc-kr', 950: 'big5', 1252: 'windows-1252', 65001: 'utf-8',
+};
+let oemLabel;
+function oemDecoderLabel() {
+  if (oemLabel !== undefined) return oemLabel;
+  oemLabel = 'windows-1252';
+  try {
+    const cp = String(execFileSync('reg', ['query',
+      'HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Nls\\\\CodePage', '/v', 'OEMCP'],
+    { encoding: 'latin1', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }));
+    const m = /OEMCP\\s+REG_SZ\\s+(\\d+)/.exec(cp);
+    if (m !== null && OEM_LABELS[m[1]] !== undefined) oemLabel = OEM_LABELS[m[1]];
+  } catch {}
+  return oemLabel;
+}
+function decodeOem(bytes) {
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {}
+  try {
+    return new TextDecoder(oemDecoderLabel()).decode(bytes);
+  } catch {}
+  return new TextDecoder('windows-1252').decode(bytes);
+}
 function registryEnv() {
   const out = {};
   if (process.platform !== 'win32') return out;
   for (const keyPath of ENV_KEY_PATHS) {
     let text;
     try {
-      text = execFileSync('reg', ['query', keyPath], {
-        encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
-      });
+      // Bytes, not a utf8 string: see decodeOem for why the encoding is not utf8.
+      text = decodeOem(execFileSync('reg', ['query', keyPath], {
+        windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
+      }));
     } catch { continue; }
-    for (const line of String(text).split(/\\r?\\n/)) {
+    for (const line of text.split(/\\r?\\n/)) {
       const m = /^\\s{4}(\\S[^\\r\\n]*?)\\s{4}(REG_[A-Z_]+)\\s{4}([\\s\\S]*)$/.exec(line);
       if (!m) continue;
       const name = m[1];
