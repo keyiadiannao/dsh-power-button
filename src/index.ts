@@ -993,8 +993,6 @@ export interface EnvRegistryValue {
   value: string
   /** REG_EXPAND_SZ: the value still contains `%NAME%` references to expand. */
   expand: boolean
-  /** REG_MULTI_SZ entries, already joined the way the environment block does. */
-  multi?: boolean
 }
 
 /**
@@ -1003,19 +1001,28 @@ export interface EnvRegistryValue {
  * `reg export` is the lossless read: it writes UTF-16LE, so a value survives
  * whatever the console code page can represent. `reg query` renders to the code
  * page and substitutes `?` for glyphs it lacks, which no decoder can undo.
- * REG_SZ appears as a quoted string; REG_EXPAND_SZ as `hex(2):` UTF-16LE bytes.
+ * Only the two string types mean anything in an environment block: REG_SZ is
+ * quoted, REG_EXPAND_SZ is `hex(2)`. A value whose hex payload is malformed is
+ * dropped instead of partially decoded — a half-decoded string is worse than a
+ * missing one, because the caller then falls back to the inherited value.
  * @param text - the decoded `.reg` file.
- * @returns every value in the key, in file order.
+ * @returns every parsable value in the key, in file order.
  */
 export function parseEnvRegExport(text: string): EnvRegistryValue[] {
   const out: EnvRegistryValue[] = []
   const unquote = (s: string): string => s.replace(/\\(.)/g, '$1')
-  /** `hex(2)` / `hex(7)` payload: comma-separated bytes holding UTF-16LE text. */
-  const utf16FromHex = (list: string): string => Buffer.from(
-    // Exactly two hex digits per token: a merged or truncated token would
-    // otherwise parse to a plausible byte and silently shift the whole string.
-    list.split(',').filter(token => /^[0-9a-f]{2}$/i.test(token)).map(token => Number.parseInt(token, 16)),
-  ).toString('utf16le').replace(/\u0000+$/, '')
+  /** `hex(2)` payload: comma-separated bytes holding UTF-16LE text, or null. */
+  const utf16FromHex = (list: string): string | null => {
+    const tokens = list.split(',').filter(token => token !== '')
+    // Two hex digits each, and an even count. Anything else means the export was
+    // truncated or mis-joined, and decoding it would build a plausible value out
+    // of the wrong bytes.
+    if (tokens.length === 0) return null
+    if (tokens.some(token => !/^[0-9a-f]{2}$/i.test(token))) return null
+    if (tokens.length % 2 !== 0) return null
+    return Buffer.from(tokens.map(token => Number.parseInt(token, 16)))
+      .toString('utf16le').replace(/\u0000+$/, '')
+  }
   // A long value is wrapped: the line ends with a single backslash and the next
   // line continues it, indented. Joining first is what keeps a long PATH from
   // being truncated to its first line — and a real PATH is both long and stored
@@ -1023,24 +1030,20 @@ export function parseEnvRegExport(text: string): EnvRegistryValue[] {
   const unfolded = text.replace(/\\\r?\n[ \t]*/g, '')
   for (const rawLine of unfolded.split(/\r?\n/)) {
     const line = rawLine.trim()
-    const quoted = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line)
-    if (quoted !== null) {
-      const name = unquote(quoted[1] ?? '')
-      const rhs = quoted[2] ?? ''
-      const hex = /^hex\(2\):(.*)$/.exec(rhs)
-      if (hex !== null) {
-        out.push({ name, value: utf16FromHex(hex[1] ?? ''), expand: true })
-        continue
-      }
-      const str = /^"(.*)"$/.exec(rhs)
-      if (str !== null) out.push({ name, value: unquote(str[1] ?? ''), expand: false })
+    const entry = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line)
+    if (entry === null) continue
+    const name = unquote(entry[1] ?? '')
+    const rhs = entry[2] ?? ''
+    const hex = /^hex\(2\):(.*)$/.exec(rhs)
+    if (hex !== null) {
+      const value = utf16FromHex(hex[1] ?? '')
+      if (value !== null) out.push({ name, value, expand: true })
       continue
     }
-    const multi = /^"((?:[^"\\]|\\.)*)"=hex\(7\):(.*)$/.exec(line)
-    if (multi !== null) {
-      const value = utf16FromHex(multi[2] ?? '').split('\u0000').filter(Boolean).join(';')
-      out.push({ name: unquote(multi[1] ?? ''), value, expand: false, multi: true })
-    }
+    const str = /^"(.*)"$/.exec(rhs)
+    // Anything else — hex(7) MULTI_SZ, hex: binary, dword: — has no meaning in an
+    // environment block, so it is ignored rather than guessed at.
+    if (str !== null) out.push({ name, value: unquote(str[1] ?? ''), expand: false })
   }
   return out
 }
@@ -1048,103 +1051,102 @@ export function parseEnvRegExport(text: string): EnvRegistryValue[] {
 /**
  * Build the environment block a newly started process would receive.
  *
- * Windows composes it machine first, then user, so a user value shadows a
- * machine value of the same name; `PATH` is the exception and is machine + user
- * concatenated. A value is expanded only when the registry stored it as
- * REG_EXPAND_SZ, and inherited values are never re-expanded — they arrive with
- * their references already resolved.
+ * Windows composes the block in stages — machine values first, then user values
+ * which shadow them — and a REG_EXPAND_SZ value is resolved against the block as
+ * it stands at ITS stage, so a machine value cannot see a user-only name. `PATH`
+ * is the exception to assignment: both halves are kept, machine first. Inherited
+ * values fill names the registry does not define and are never re-expanded, since
+ * they arrive with their references already resolved.
  * @param machine - values from the HKLM session-manager key.
  * @param user - values from HKCU\Environment.
  * @param inherited - this process's own environment, used only where the
- * registry defines nothing (and for `PATH` entries the registry lacks).
+ * registry defines nothing, and to complete `PATH`.
  * @returns the composed block plus where it came from.
  */
 export function mergeEnvironment(
   machine: readonly EnvRegistryValue[],
   user: readonly EnvRegistryValue[],
   inherited: Record<string, string | undefined>,
-): { env: Record<string, string>; source: 'registry' | 'inherited' | 'none' } {
-  const lookup = (env: Record<string, string>, name: string): string | undefined => {
-    const wanted = name.toLowerCase()
-    return Object.keys(env).find(key => key.toLowerCase() === wanted) === undefined
-      ? undefined
-      : env[Object.keys(env).find(key => key.toLowerCase() === wanted) as string]
-  }
-  const assign = (env: Record<string, string>, name: string, value: string): void => {
-    const wanted = name.toLowerCase()
-    const existing = Object.keys(env).find(key => key.toLowerCase() === wanted)
-    if (existing !== undefined) delete env[existing]
-    env[name] = value
-  }
-  const expandValue = (value: string, env: Record<string, string>): string =>
-    value.replace(/%([^%]+)%/g, (whole, name: string) => lookup(env, name) ?? whole)
-
-  const pathParts: Array<{ text: string; expand: boolean }> = []
-  // Keyed by lower-case name so a later value REPLACES the earlier flag: if the
-  // user redefines a machine REG_EXPAND_SZ as REG_SZ, the winner's type decides,
-  // not a flag accumulated from the loser.
-  const expandFlags = new Map<string, boolean>()
-  let sawRegistry = false
+): { env: Record<string, string>; source: 'registry' | 'inherited' } {
+  // One lower-case index over the composed block: Windows treats names
+  // case-insensitively, and every read and write goes through it so an existing
+  // spelling is replaced rather than joined by a second one.
   const env: Record<string, string> = {}
-  const addPath = (text: string, expand: boolean): void => {
-    for (const part of text.split(';').filter(Boolean)) pathParts.push({ text: part, expand })
+  const index = new Map<string, string>()
+  const set = (name: string, value: string): void => {
+    const lower = name.toLowerCase()
+    const existing = index.get(lower)
+    if (existing !== undefined && existing !== name) delete env[existing]
+    env[name] = value
+    index.set(lower, name)
   }
-  for (const source of [machine, user]) {
-    for (const entry of source) {
-      sawRegistry = true
+  const get = (name: string): string | undefined => {
+    const key = index.get(name.toLowerCase())
+    return key === undefined ? undefined : env[key]
+  }
+  const expandValue = (value: string): string =>
+    value.replace(/%([^%]+)%/g, (whole, name: string) => get(name) ?? whole)
+
+  const pathParts: string[] = []
+  /** Apply one stage: assign, expand that stage's own values, then its PATH parts. */
+  const applyStage = (entries: readonly EnvRegistryValue[]): void => {
+    const pending: string[] = []
+    const stageParts: Array<{ text: string; expand: boolean }> = []
+    for (const entry of entries) {
       if (entry.name.toLowerCase() === 'path') {
-        // Per-segment: PATH is assembled from parts rather than assigned, so it
-        // cannot ride the generic pass below — and the two halves can disagree.
-        // Expanding the joined string would resolve a REG_SZ half's literals
-        // because the other half needed it.
-        addPath(entry.value, entry.expand)
+        for (const part of entry.value.split(';').filter(Boolean)) {
+          stageParts.push({ text: part, expand: entry.expand })
+        }
         continue
       }
-      assign(env, entry.name, entry.value)
-      expandFlags.set(entry.name.toLowerCase(), entry.expand)
+      set(entry.name, entry.value)
+      if (entry.expand) pending.push(entry.name)
     }
+    // Expansion is per stage, so a machine value cannot resolve a user-only name.
+    for (const name of pending) {
+      const current = get(name)
+      if (current !== undefined) set(name, expandValue(current))
+    }
+    // PATH is assembled from parts rather than assigned, and the two halves can
+    // disagree on type, so each part is expanded according to its own source.
+    for (const part of stageParts) pathParts.push(part.expand ? expandValue(part.text) : part.text)
   }
+  // The inherited block is the base layer, not a last-resort fill: some names a
+  // registry value references exist ONLY in the process block — SystemRoot is
+  // absent from both environment keys on a real machine — so expanding without it
+  // would leave %SystemRoot% literal in a machine PATH forever. Machine and user
+  // values then shadow this layer, which keeps the stage isolation intact.
+  for (const [name, value] of Object.entries(inherited)) {
+    if (typeof value === 'string') set(name, value)
+  }
+  if (machine.length === 0 && user.length === 0) return { env, source: 'inherited' }
+
+  applyStage(machine)
+  applyStage(user)
+
   // Registry PATH entries lead, then whatever the inherited PATH had that the
   // registry does not: pnpm and tsx prepend node_modules/.bin to the launcher's
   // PATH, and dropping those would break every child resolving a binary by name.
   const inheritedPath = Object.keys(inherited).find(key => key.toLowerCase() === 'path')
-  if (inheritedPath !== undefined) addPath(String(inherited[inheritedPath] ?? ''), false)
-  if (!sawRegistry) {
-    for (const [name, value] of Object.entries(inherited)) {
-      if (typeof value === 'string') assign(env, name, value)
+  if (inheritedPath !== undefined) {
+    for (const part of String(inherited[inheritedPath] ?? '').split(';').filter(Boolean)) {
+      pathParts.push(part)
     }
-    return { env, source: 'inherited' }
-  }
-  for (const [name, value] of Object.entries(inherited)) {
-    if (typeof value !== 'string') continue
-    if (lookup(env, name) !== undefined) continue
-    assign(env, name, value)
-  }
-  // Expansion runs on the COMPOSED block, so a REG_EXPAND_SZ value can reference
-  // a name that a later-read key defines. The flag comes from the value that WON:
-  // a REG_SZ user value shadowing a REG_EXPAND_SZ machine value keeps its literal
-  // percent signs, as Windows leaves them.
-  for (const [lower, expand] of expandFlags) {
-    if (!expand) continue
-    const key = Object.keys(env).find(candidate => candidate.toLowerCase() === lower)
-    const current = key === undefined ? undefined : env[key]
-    if (key === undefined || current === undefined) continue
-    env[key] = expandValue(current, env)
   }
   if (pathParts.length > 0) {
-    // Expanded first, deduped after: the registry's %SystemRoot%\System32 and an
-    // inherited C:\Windows\System32 are the same directory, and comparing the
-    // unexpanded text would keep both and grow PATH on every restart.
+    // Deduped after expansion: the registry's %SystemRoot%\System32 and an
+    // inherited C:\Windows\System32 are the same directory, and comparing raw
+    // text would keep both and grow PATH on every restart.
     const ordered: string[] = []
     const seen = new Set<string>()
     for (const part of pathParts) {
-      const text = part.expand ? expandValue(part.text, env) : part.text
-      if (seen.has(text.toLowerCase())) continue
-      seen.add(text.toLowerCase())
-      ordered.push(text)
+      if (seen.has(part.toLowerCase())) continue
+      seen.add(part.toLowerCase())
+      ordered.push(part)
     }
-    assign(env, 'PATH', ordered.join(';'))
+    set('PATH', ordered.join(';'))
   }
+  return { env, source: 'registry' }
   return { env, source: 'registry' }
 }
 
@@ -1370,13 +1372,29 @@ function sessionsQuiescent(maxWaitMs) {
     }
     return null;
   }
+  // Sampled once per restart, lazily: every attempt must launch with the same
+  // block, and re-reading the registry per attempt would cost two reg exports
+  // (and two temp files) each. Lives at helper scope because trySpawnOnce is not
+  // nested inside the run IIFE.
+  let launchEnv = null;
   async function trySpawnOnce(attempt) {
     patchStatus({ stage: 'launching', attempt: attempt });
+    if (launchEnv === null) {
+      launchEnv = Object.assign(freshEnv().env, { DSH_POWER_RESTART_ID: RESTART_ID });
+    }
     const out = fs.openSync(SERVER_LOG, 'a');
-    const child = spawn(relaunch[0], relaunch.slice(1), {
-      cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
-      env: Object.assign(freshEnv().env, { DSH_POWER_RESTART_ID: RESTART_ID }),
-    });
+    let child;
+    try {
+      child = spawn(relaunch[0], relaunch.slice(1), {
+        cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
+        env: launchEnv,
+      });
+    } finally {
+      // The child holds its own duplicated handle; this parent-side one is only
+      // needed for the spawn call and would otherwise keep the log file open
+      // until the helper exits.
+      try { fs.closeSync(out); } catch {}
+    }
     const spawned = await new Promise((resolve) => {
       child.once('spawn', () => resolve(true));
       child.once('error', () => resolve(false));

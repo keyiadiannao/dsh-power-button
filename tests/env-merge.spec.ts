@@ -103,13 +103,27 @@ describe('mergeEnvironment', () => {
 
   it('expands only values the registry stored as REG_EXPAND_SZ', () => {
     const merged = mergeEnvironment(
-      [value('EXPANDED', 'home=%HOME%', true), value('LITERAL', 'token=abc%HOME%xyz', false)],
-      [value('HOME', 'C:\\Users\\me')],
+      [value('HOME', 'C:\\Users\\me'), value('EXPANDED', 'home=%HOME%', true),
+        value('LITERAL', 'token=abc%HOME%xyz', false)],
+      [],
       inherited,
     )
     expect(merged.env.EXPANDED).toBe('home=C:\\Users\\me')
     // A REG_SZ value keeps its percent signs: Windows does not expand it.
     expect(merged.env.LITERAL).toBe('token=abc%HOME%xyz')
+  })
+
+  it('resolves machine references in the machine stage only', () => {
+    // Windows builds the machine block before the user block exists, so a machine
+    // REG_EXPAND_SZ cannot see a user-only name — while a user value CAN see the
+    // machine ones, because they are already in the block by then.
+    const merged = mergeEnvironment(
+      [value('MACHINE_ONLY', 'C:\\M'), value('MACHINE_REF', '%USER_ONLY%\\bin', true)],
+      [value('USER_ONLY', 'D:\\Tools'), value('USER_REF', '%MACHINE_ONLY%\\x', true)],
+      {},
+    )
+    expect(merged.env.MACHINE_REF).toBe('%USER_ONLY%\\bin')
+    expect(merged.env.USER_REF).toBe('C:\\M\\x')
   })
 
   it('never re-expands an inherited value', () => {
