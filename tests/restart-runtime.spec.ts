@@ -472,6 +472,15 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
     // mechanism exists to replace — and the damage is invisible because the
     // relaunch still reports ready.
     if (process.platform !== 'win32') return
+    // reg.exe renders to the console code page BEFORE any decoder sees the
+    // bytes: on a locale whose code page lacks these glyphs it substitutes '?'
+    // at render time, which no decoder can undo (an English Windows reports
+    // `C:\????\?? ??`). The case is therefore meaningful only where the glyphs
+    // exist; elsewhere the ASCII environment case still covers the refresh.
+    const oemcp = Number((/OEMCP\s+REG_SZ\s+(\d+)/.exec(String(execFileSync('reg', [
+      'query', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage', '/v', 'OEMCP',
+    ], { encoding: 'latin1', windowsHide: true }))) ?? [])[1])
+    if (![936, 950, 932, 949].includes(oemcp)) return
     const name = `DSH_POWER_CJK_PROBE_${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`
     const value = 'C:\\测试目录\\中文 路径'
     const dumpDir = mkdtempSync(join(tmpdir(), 'dsh-power-cjk-'))
