@@ -981,6 +981,146 @@ export interface RestartHelperPayload {
   origin?: RestartOrigin
 }
 
+/** One value read from an environment registry key. */
+export interface EnvRegistryValue {
+  /** Case preserved as stored; comparisons are case-insensitive. */
+  name: string
+  value: string
+  /** REG_EXPAND_SZ: the value still contains `%NAME%` references to expand. */
+  expand: boolean
+  /** REG_MULTI_SZ entries, already joined the way the environment block does. */
+  multi?: boolean
+}
+
+/**
+ * Parse the `.reg` export of an environment key.
+ *
+ * `reg export` is the lossless read: it writes UTF-16LE, so a value survives
+ * whatever the console code page can represent. `reg query` renders to the code
+ * page and substitutes `?` for glyphs it lacks, which no decoder can undo.
+ * REG_SZ appears as a quoted string; REG_EXPAND_SZ as `hex(2):` UTF-16LE bytes.
+ * @param text - the decoded `.reg` file.
+ * @returns every value in the key, in file order.
+ */
+export function parseEnvRegExport(text: string): EnvRegistryValue[] {
+  const out: EnvRegistryValue[] = []
+  const unquote = (s: string): string => s.replace(/\\(.)/g, '$1')
+  /** `hex(2)` / `hex(7)` payload: comma-separated bytes holding UTF-16LE text. */
+  const utf16FromHex = (list: string): string => Buffer.from(
+    list.split(',').map(part => Number.parseInt(part, 16)).filter(n => Number.isFinite(n)),
+  ).toString('utf16le').replace(/\u0000+$/, '')
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    const quoted = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line)
+    if (quoted !== null) {
+      const name = unquote(quoted[1] ?? '')
+      const rhs = quoted[2] ?? ''
+      const hex = /^hex\(2\):(.*)$/.exec(rhs)
+      if (hex !== null) {
+        out.push({ name, value: utf16FromHex(hex[1] ?? ''), expand: true })
+        continue
+      }
+      const str = /^"(.*)"$/.exec(rhs)
+      if (str !== null) out.push({ name, value: unquote(str[1] ?? ''), expand: false })
+      continue
+    }
+    const multi = /^"((?:[^"\\]|\\.)*)"=hex\(7\):(.*)$/.exec(line)
+    if (multi !== null) {
+      const value = utf16FromHex(multi[2] ?? '').split('\u0000').filter(Boolean).join(';')
+      out.push({ name: unquote(multi[1] ?? ''), value, expand: false, multi: true })
+    }
+  }
+  return out
+}
+
+/**
+ * Build the environment block a newly started process would receive.
+ *
+ * Windows composes it machine first, then user, so a user value shadows a
+ * machine value of the same name; `PATH` is the exception and is machine + user
+ * concatenated. A value is expanded only when the registry stored it as
+ * REG_EXPAND_SZ, and inherited values are never re-expanded — they arrive with
+ * their references already resolved.
+ * @param machine - values from the HKLM session-manager key.
+ * @param user - values from HKCU\Environment.
+ * @param inherited - this process's own environment, used only where the
+ * registry defines nothing (and for `PATH` entries the registry lacks).
+ * @returns the composed block plus where it came from.
+ */
+export function mergeEnvironment(
+  machine: readonly EnvRegistryValue[],
+  user: readonly EnvRegistryValue[],
+  inherited: Record<string, string | undefined>,
+): { env: Record<string, string>; source: 'registry' | 'inherited' | 'none' } {
+  const lookup = (env: Record<string, string>, name: string): string | undefined => {
+    const wanted = name.toLowerCase()
+    return Object.keys(env).find(key => key.toLowerCase() === wanted) === undefined
+      ? undefined
+      : env[Object.keys(env).find(key => key.toLowerCase() === wanted) as string]
+  }
+  const assign = (env: Record<string, string>, name: string, value: string): void => {
+    const wanted = name.toLowerCase()
+    const existing = Object.keys(env).find(key => key.toLowerCase() === wanted)
+    if (existing !== undefined) delete env[existing]
+    env[name] = value
+  }
+  const expandValue = (value: string, env: Record<string, string>): string =>
+    value.replace(/%([^%]+)%/g, (whole, name: string) => lookup(env, name) ?? whole)
+
+  const pathParts: string[] = []
+  const seenPath = new Set<string>()
+  const toExpand: string[] = []
+  let sawRegistry = false
+  const env: Record<string, string> = {}
+  const addPath = (text: string): void => {
+    // Deduped across both keys: the inherited PATH already contains what the
+    // LAST restart composed, so appending without this grows it on every restart.
+    for (const part of text.split(';').filter(Boolean)) {
+      if (seenPath.has(part.toLowerCase())) continue
+      seenPath.add(part.toLowerCase())
+      pathParts.push(part)
+    }
+  }
+  for (const source of [machine, user]) {
+    for (const entry of source) {
+      sawRegistry = true
+      if (entry.name.toLowerCase() === 'path') {
+        addPath(entry.value)
+        continue
+      }
+      assign(env, entry.name, entry.value)
+      if (entry.expand) toExpand.push(entry.name)
+    }
+  }
+  // Registry PATH entries lead, then whatever the inherited PATH had that the
+  // registry does not: pnpm and tsx prepend node_modules/.bin to the launcher's
+  // PATH, and dropping those would break every child resolving a binary by name.
+  const inheritedPath = Object.keys(inherited).find(key => key.toLowerCase() === 'path')
+  if (inheritedPath !== undefined) addPath(String(inherited[inheritedPath] ?? ''))
+  if (pathParts.length > 0) assign(env, 'PATH', pathParts.join(';'))
+  if (!sawRegistry) {
+    for (const [name, value] of Object.entries(inherited)) {
+      if (typeof value === 'string') assign(env, name, value)
+    }
+    return { env, source: 'inherited' }
+  }
+  for (const [name, value] of Object.entries(inherited)) {
+    if (typeof value !== 'string') continue
+    if (lookup(env, name) !== undefined) continue
+    assign(env, name, value)
+  }
+  // Expansion runs on the COMPOSED block, so a REG_EXPAND_SZ value can reference
+  // a name that a later-read key defines. Only flagged values are touched: a
+  // REG_SZ value keeps its literal percent signs, as Windows leaves them.
+  for (const name of toExpand) {
+    const key = Object.keys(env).find(candidate => candidate.toLowerCase() === name.toLowerCase())
+    const current = key === undefined ? undefined : env[key]
+    if (key === undefined || current === undefined) continue
+    env[key] = expandValue(current, env)
+  }
+  return { env, source: 'registry' }
+}
+
 /**
  * Generate the detached restart helper. A pure function of the payload: the
  * runtime acceptance tests execute its output directly, so what the E2E
@@ -1018,134 +1158,56 @@ function log(m) {
   try { fs.appendFileSync(LOG, new Date().toISOString() + ' ' + m + '\\n'); } catch {}
 }
 // The successor must start from the CURRENT OS environment. A process
-// environment is a snapshot captured when its launcher started, and this helper
-// only inherits the OLD DSH process's copy, so a variable changed after that
-// process started (setx, System Properties, an installer) would never reach the
-// relaunched instance. Re-read it from the registry instead: that is what a
-// freshly opened shell would see. reg.exe is used rather than PowerShell
-// because it opens no window and carries no quoting traps.
-const ENV_KEY_PATHS = [
-  'HKCU\\\\Environment',
-  'HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Environment',
-];
-// reg.exe encodes its PIPED stdout with the OEM code page, and a pipe has no
-// console, so a chcp cannot change it. Decoding those bytes as UTF-8 mangles
-// every non-ASCII value: a Chinese PATH entry would reach the successor as
-// replacement characters, which is worse than the stale value this mechanism
-// exists to fix. Decode strictly first and widen only on failure.
-const OEM_LABELS = {
-  866: 'ibm866', 874: 'windows-874', 932: 'shift_jis', 936: 'gbk',
-  949: 'euc-kr', 950: 'big5', 1252: 'windows-1252', 65001: 'utf-8',
+// environment is a snapshot captured when its launcher started, so inheriting
+// this helper's copy would replay values the user has since changed (setx,
+// System Properties, an installer). Re-read it from the registry instead.
+const ENV_KEYS = {
+  machine: 'HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Session Manager\\\\Environment',
+  user: 'HKCU\\\\Environment',
 };
-let oemLabel;
-function oemDecoderLabel() {
-  if (oemLabel !== undefined) return oemLabel;
-  oemLabel = 'windows-1252';
+const parseEnvRegExport = ${parseEnvRegExport.toString()};
+const mergeEnvironment = ${mergeEnvironment.toString()};
+function readEnvKey(keyPath) {
+  // 'reg export' writes UTF-16LE, so a value survives whatever the console code
+  // page can represent. 'reg query' renders to the code page and substitutes
+  // '?' for glyphs it lacks, which no decoder can undo. The export file carries
+  // the environment, so it lives beside the helper in the 0700 runtime dir and
+  // is removed in the same call.
+  const file = nodePath.join(nodePath.dirname(LOG),
+    'env-' + process.pid + '-' + Math.random().toString(36).slice(2) + '.reg');
   try {
-    const cp = String(execFileSync('reg', ['query',
-      'HKLM\\\\SYSTEM\\\\CurrentControlSet\\\\Control\\\\Nls\\\\CodePage', '/v', 'OEMCP'],
-    { encoding: 'latin1', windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }));
-    const m = /OEMCP\\s+REG_SZ\\s+(\\d+)/.exec(cp);
-    if (m !== null && OEM_LABELS[m[1]] !== undefined) oemLabel = OEM_LABELS[m[1]];
-  } catch {}
-  return oemLabel;
-}
-function decodeOem(bytes) {
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch {}
-  try {
-    return new TextDecoder(oemDecoderLabel()).decode(bytes);
-  } catch {}
-  return new TextDecoder('windows-1252').decode(bytes);
-}
-// reg.exe renders to the console code page. A PIPE has no console, so it falls
-// back to the OEM page, which cannot represent characters outside it: an English
-// Windows (437) turned a Chinese value into '?' — lossy, and no decoding can
-// recover it. chcp 65001 first makes reg.exe emit UTF-8 on every locale. The
-// command string is fixed and the key path comes from this file, so no caller
-// data reaches cmd's parser.
-function readRegistryKey(keyPath) {
-  try {
-    return new TextDecoder('utf-8').decode(execFileSync('cmd', [
-      '/d', '/c', 'chcp 65001>nul & reg query "' + keyPath + '"',
-    ], { windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }));
+    execFileSync('reg', ['export', keyPath, file, '/y'], { windowsHide: true, stdio: 'ignore' });
+    const raw = fs.readFileSync(file);
+    const text = raw.length > 1 && raw[0] === 0xff && raw[1] === 0xfe
+      ? raw.subarray(2).toString('utf16le')
+      : raw.toString('utf8');
+    return parseEnvRegExport(text);
   } catch {
-    // No cmd, or a locale where chcp is refused: fall back to the OEM path.
-    return decodeOem(execFileSync('reg', ['query', keyPath], {
-      windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'],
-    }));
+    return null;
+  } finally {
+    try { fs.unlinkSync(file); } catch {}
   }
 }
-function registryEnv() {
-  const out = {};
-  if (process.platform !== 'win32') return out;
-  for (const keyPath of ENV_KEY_PATHS) {
-    let text;
-    try {
-      text = readRegistryKey(keyPath);
-    } catch { continue; }
-    for (const line of text.split(/\\r?\\n/)) {
-      const m = /^\\s{4}(\\S[^\\r\\n]*?)\\s{4}(REG_[A-Z_]+)\\s{4}([\\s\\S]*)$/.exec(line);
-      if (!m) continue;
-      const name = m[1];
-      const type = m[2];
-      const raw = m[3];
-      if (type === 'REG_MULTI_SZ') out[name] = raw.split('\\\\0').filter(Boolean).join(';');
-      else if (type === 'REG_DWORD') out[name] = String(parseInt(raw, 16));
-      else out[name] = raw;
-    }
-  }
-  return out;
-}
-// Windows environment names are case-insensitive, so a lookup must be too:
-// writing "Path" beside an inherited "PATH" would give the child two spellings.
-function envKey(env, name) {
-  const wanted = name.toLowerCase();
-  return Object.keys(env).find((k) => k.toLowerCase() === wanted);
-}
-function expandEnvValue(value, env) {
-  return value.replace(/%([^%]+)%/g, (whole, name) => {
-    const key = envKey(env, name);
-    return key === undefined ? whole : env[key];
-  });
-}
-// Registry values lead (they are the current truth); inherited entries survive
-// only where the registry has none. PATH is the exception: pnpm and tsx prepend
-// node_modules/.bin to the launcher's PATH, and dropping those entries would
-// break every child that resolves a binary through PATH, so the registry's
-// entries lead and the inherited extras follow.
 function freshEnv() {
-  const fromRegistry = registryEnv();
-  const merged = Object.assign({}, process.env);
-  const set = (name, value) => {
-    const existing = envKey(merged, name);
-    if (existing !== undefined) delete merged[existing];
-    merged[name] = value;
-  };
-  let registryPath;
-  for (const name of Object.keys(fromRegistry)) {
-    if (name.toLowerCase() === 'path') { registryPath = fromRegistry[name]; continue; }
-    set(name, fromRegistry[name]);
+  const inherited = {};
+  for (const name of Object.keys(process.env)) {
+    if (typeof process.env[name] === 'string') inherited[name] = process.env[name];
   }
-  if (registryPath !== undefined) {
-    const entries = registryPath.split(';').filter(Boolean);
-    const seen = new Set(entries.map((e) => e.toLowerCase()));
-    const inheritedKey = envKey(merged, 'path');
-    const inherited = inheritedKey === undefined ? '' : merged[inheritedKey];
-    for (const entry of inherited.split(';').filter(Boolean)) {
-      const lower = entry.toLowerCase();
-      if (seen.has(lower)) continue;
-      entries.push(entry);
-      seen.add(lower);
-    }
-    set('PATH', entries.join(';'));
+  if (process.platform !== 'win32') return { env: inherited, source: 'inherited' };
+  const machine = readEnvKey(ENV_KEYS.machine);
+  const user = readEnvKey(ENV_KEYS.user);
+  if (machine === null && user === null) {
+    log('environment refresh: registry unreadable, inheriting the launcher block');
+    return { env: inherited, source: 'inherited' };
   }
-  // REG_EXPAND_SZ arrives as the literal %NAME% text; CreateProcess does not
-  // expand a caller-supplied block, so resolve the references here.
-  for (const name of Object.keys(merged)) {
-    if (merged[name].indexOf('%') !== -1) merged[name] = expandEnvValue(merged[name], merged);
-  }
+  const merged = mergeEnvironment(
+    machine === null ? [] : machine,
+    user === null ? [] : user,
+    inherited,
+  );
+  log('environment refresh: source=' + merged.source
+    + ' machine=' + (machine === null ? 'unreadable' : machine.length + ' values')
+    + ' user=' + (user === null ? 'unreadable' : user.length + ' values'));
   return merged;
 }
 function pidGone(pid) {
@@ -1280,7 +1342,7 @@ function sessionsQuiescent(maxWaitMs) {
     const out = fs.openSync(SERVER_LOG, 'a');
     const child = spawn(relaunch[0], relaunch.slice(1), {
       cwd, detached: true, stdio: ['ignore', out, out], windowsHide: true,
-      env: Object.assign(freshEnv(), { DSH_POWER_RESTART_ID: RESTART_ID }),
+      env: Object.assign(freshEnv().env, { DSH_POWER_RESTART_ID: RESTART_ID }),
     });
     const spawned = await new Promise((resolve) => {
       child.once('spawn', () => resolve(true));

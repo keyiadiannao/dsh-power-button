@@ -321,6 +321,45 @@ interface RestartHelperPayload {
    * guessing. Absent when the caller had no causal session. */
   origin?: RestartOrigin;
 }
+/** One value read from an environment registry key. */
+interface EnvRegistryValue {
+  /** Case preserved as stored; comparisons are case-insensitive. */
+  name: string;
+  value: string;
+  /** REG_EXPAND_SZ: the value still contains `%NAME%` references to expand. */
+  expand: boolean;
+  /** REG_MULTI_SZ entries, already joined the way the environment block does. */
+  multi?: boolean;
+}
+/**
+ * Parse the `.reg` export of an environment key.
+ *
+ * `reg export` is the lossless read: it writes UTF-16LE, so a value survives
+ * whatever the console code page can represent. `reg query` renders to the code
+ * page and substitutes `?` for glyphs it lacks, which no decoder can undo.
+ * REG_SZ appears as a quoted string; REG_EXPAND_SZ as `hex(2):` UTF-16LE bytes.
+ * @param text - the decoded `.reg` file.
+ * @returns every value in the key, in file order.
+ */
+declare function parseEnvRegExport(text: string): EnvRegistryValue[];
+/**
+ * Build the environment block a newly started process would receive.
+ *
+ * Windows composes it machine first, then user, so a user value shadows a
+ * machine value of the same name; `PATH` is the exception and is machine + user
+ * concatenated. A value is expanded only when the registry stored it as
+ * REG_EXPAND_SZ, and inherited values are never re-expanded — they arrive with
+ * their references already resolved.
+ * @param machine - values from the HKLM session-manager key.
+ * @param user - values from HKCU\Environment.
+ * @param inherited - this process's own environment, used only where the
+ * registry defines nothing (and for `PATH` entries the registry lacks).
+ * @returns the composed block plus where it came from.
+ */
+declare function mergeEnvironment(machine: readonly EnvRegistryValue[], user: readonly EnvRegistryValue[], inherited: Record<string, string | undefined>): {
+  env: Record<string, string>;
+  source: 'registry' | 'inherited' | 'none';
+};
 /**
  * Generate the detached restart helper. A pure function of the payload: the
  * runtime acceptance tests execute its output directly, so what the E2E
@@ -465,4 +504,4 @@ declare function connectionRejection(ctx: any, req: {
 }): 401 | 403 | undefined | null;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, name, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
