@@ -41,6 +41,23 @@ describe('parseEnvRegExport', () => {
     ].join('\r\n')
     expect(parseEnvRegExport(text)).toEqual([])
   })
+
+  it('joins backslash continuation lines, so a long value is not truncated', () => {
+    // reg export wraps a hex payload: the line ends with a single backslash and
+    // the next line continues it. A real PATH is long enough to always wrap.
+    const long = `C:\\${'a'.repeat(80)};D:\\Second`
+    const bytes = Array.from(Buffer.from(long, 'utf16le')).map(b => b.toString(16).padStart(2, '0'))
+    const wrapped: string[] = []
+    for (let i = 0; i < bytes.length; i += 20) {
+      const prefix = i === 0 ? '"Path"=hex(2):' : '  '
+      // The real format puts the comma BEFORE the continuation backslash.
+      const tail = i + 20 < bytes.length ? '\\' : ''
+      wrapped.push(prefix + bytes.slice(i, i + 20).join(',') + (tail === '' ? '' : ',' + tail))
+    }
+    const parsed = parseEnvRegExport(['[HKEY_CURRENT_USER\\Environment]', ...wrapped].join('\r\n'))
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0]?.value).toBe(long)
+  })
 })
 
 describe('mergeEnvironment', () => {
@@ -120,5 +137,25 @@ describe('mergeEnvironment', () => {
     const merged = mergeEnvironment([value('Path', 'C:\\m', true)], [value('PATH', 'C:\\u', true)], {})
     const spellings = Object.keys(merged.env).filter(key => key.toLowerCase() === 'path')
     expect(spellings).toHaveLength(1)
+  })
+
+  it('expands %NAME% inside a REG_EXPAND_SZ PATH, which CreateProcess will not do', () => {
+    // A caller-supplied block is used verbatim, so a literal %SystemRoot% would
+    // reach the successor as text and never resolve.
+    const merged = mergeEnvironment(
+      [value('SystemRoot', 'C:\\Windows'), value('Path', '%SystemRoot%\\System32', true)],
+      [value('USERPROFILE', 'C:\\Users\\me'), value('Path', '%USERPROFILE%\\AppData', true)],
+      {},
+    )
+    expect(merged.env.PATH).toBe('C:\\Windows\\System32;C:\\Users\\me\\AppData')
+  })
+
+  it('leaves percent signs in a REG_SZ PATH untouched', () => {
+    const merged = mergeEnvironment(
+      [value('SystemRoot', 'C:\\Windows'), value('Path', '%SystemRoot%\\x', false)],
+      [],
+      {},
+    )
+    expect(merged.env.PATH).toBe('%SystemRoot%\\x')
   })
 })

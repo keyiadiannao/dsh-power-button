@@ -505,4 +505,45 @@ describe('restart runtime acceptance (real helper, real processes)', () => {
       killPid(rig.helper.pid)
     }
   })
+
+  it('carries a long REG_EXPAND_SZ value with its references expanded', { timeout: 60_000 }, async () => {
+    // Two things at once, both only visible end to end: reg export wraps a long
+    // payload across continuation lines, and a caller-supplied block is not
+    // expanded by CreateProcess, so %SystemRoot% must be resolved by the helper.
+    if (process.platform !== 'win32') return
+    const name = `DSH_POWER_LONG_PROBE_${randomUUID().replace(/-/g, '').slice(0, 10).toUpperCase()}`
+    const parts = Array.from({ length: 12 }, (_unused, i) => `%SystemRoot%\\dsh-probe-${i}`)
+    const stored = parts.join(';')
+    const systemRoot = process.env.SystemRoot ?? ''
+    const expected = parts.map(part => part.replace('%SystemRoot%', systemRoot)).join(';')
+    const dumpDir = mkdtempSync(join(tmpdir(), 'dsh-power-long-'))
+    const dumpFile = join(dumpDir, 'env.txt')
+    execFileSync('reg', ['add', 'HKCU\\Environment', '/v', name, '/t', 'REG_EXPAND_SZ', '/d', stored, '/f'],
+      { windowsHide: true })
+    cleanups.push(() => {
+      try {
+        execFileSync('reg', ['delete', 'HKCU\\Environment', '/v', name, '/f'], { windowsHide: true })
+      } catch { /* already removed */ }
+      rmSync(dumpDir, { recursive: true, force: true })
+    })
+    const rig = await startRidge({ targetArgs: ['--dump-env', name, '--dump-env-file', dumpFile] })
+    let newPid: number | undefined
+    try {
+      await commitAndExitOld(rig)
+      const done = await waitFor(() => {
+        const s = readStatus(rig.statusFile)
+        return s !== null && (s.stage === 'ready' || s.stage === 'failed') ? s : null
+      }, 45_000)
+      expect(done?.stage).toBe('ready')
+      newPid = done?.newPid as number
+      const seen = readFileSync(dumpFile, 'utf8')
+      // Truncation at the first continuation line would fail here, as would an
+      // unexpanded %SystemRoot%.
+      expect(seen).toBe(expected)
+    } finally {
+      killPid(rig.old.pid)
+      killPid(newPid)
+      killPid(rig.helper.pid)
+    }
+  })
 })

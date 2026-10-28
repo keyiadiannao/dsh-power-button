@@ -666,14 +666,14 @@ export function requestAppExit(
 export function pruneOldRestartLogs(maxAgeDays = 7): void {
   const cutoff = Date.now() - maxAgeDays * 24 * 3600 * 1000
 
-  const prune = (dir: string, claims: (name: string) => boolean): void => {
+  const prune = (dir: string, claims: (name: string) => boolean, olderThan = cutoff): void => {
     let names: string[]
     try { names = fs.readdirSync(dir) } catch { return }
     for (const name of names) {
       if (!claims(name)) continue
       const full = path.join(dir, name)
       try {
-        if (fs.statSync(full).mtimeMs < cutoff) fs.unlinkSync(full)
+        if (fs.statSync(full).mtimeMs < olderThan) fs.unlinkSync(full)
       } catch { /* ignore */ }
     }
   }
@@ -681,6 +681,11 @@ export function pruneOldRestartLogs(maxAgeDays = 7): void {
   prune(RUNTIME_DIR, (name) =>
     (name.startsWith('restart-helper-') && name.endsWith('.log'))
     || (name.startsWith('dsh-restart-helper-') && name.endsWith('.cjs')))
+  // A killed helper can leave its registry export behind. It is valid for the
+  // milliseconds the helper reads it, so anything older than an hour is residue
+  // — and it carries the environment, so it does not wait the full retention.
+  prune(RUNTIME_DIR, (name) => name.startsWith('env-') && name.endsWith('.reg'),
+    Date.now() - 60 * 60 * 1000)
   prune(restartDir(), (name) => name.endsWith('.status.json') || name.endsWith('.commit.json'))
   // A notice whose session never comes back would otherwise wait forever and
   // then describe a restart that is long irrelevant.
@@ -1007,9 +1012,16 @@ export function parseEnvRegExport(text: string): EnvRegistryValue[] {
   const unquote = (s: string): string => s.replace(/\\(.)/g, '$1')
   /** `hex(2)` / `hex(7)` payload: comma-separated bytes holding UTF-16LE text. */
   const utf16FromHex = (list: string): string => Buffer.from(
-    list.split(',').map(part => Number.parseInt(part, 16)).filter(n => Number.isFinite(n)),
+    // Exactly two hex digits per token: a merged or truncated token would
+    // otherwise parse to a plausible byte and silently shift the whole string.
+    list.split(',').filter(token => /^[0-9a-f]{2}$/i.test(token)).map(token => Number.parseInt(token, 16)),
   ).toString('utf16le').replace(/\u0000+$/, '')
-  for (const rawLine of text.split(/\r?\n/)) {
+  // A long value is wrapped: the line ends with a single backslash and the next
+  // line continues it, indented. Joining first is what keeps a long PATH from
+  // being truncated to its first line — and a real PATH is both long and stored
+  // as REG_EXPAND_SZ, so it always takes this shape.
+  const unfolded = text.replace(/\\\r?\n[ \t]*/g, '')
+  for (const rawLine of unfolded.split(/\r?\n/)) {
     const line = rawLine.trim()
     const quoted = /^"((?:[^"\\]|\\.)*)"=(.*)$/.exec(line)
     if (quoted !== null) {
@@ -1070,6 +1082,7 @@ export function mergeEnvironment(
   const pathParts: string[] = []
   const seenPath = new Set<string>()
   const toExpand: string[] = []
+  let pathNeedsExpand = false
   let sawRegistry = false
   const env: Record<string, string> = {}
   const addPath = (text: string): void => {
@@ -1085,6 +1098,11 @@ export function mergeEnvironment(
     for (const entry of source) {
       sawRegistry = true
       if (entry.name.toLowerCase() === 'path') {
+        // PATH is deleted into parts rather than assigned, so it cannot ride the
+        // generic expansion below; it needs it as much as anything: real entries
+        // are written as %SystemRoot%\System32 and a caller-supplied block is not
+        // expanded by CreateProcess.
+        if (entry.expand) pathNeedsExpand = true
         addPath(entry.value)
         continue
       }
@@ -1117,6 +1135,11 @@ export function mergeEnvironment(
     const current = key === undefined ? undefined : env[key]
     if (key === undefined || current === undefined) continue
     env[key] = expandValue(current, env)
+  }
+  if (pathNeedsExpand) {
+    const key = Object.keys(env).find(candidate => candidate.toLowerCase() === 'path')
+    const current = key === undefined ? undefined : env[key]
+    if (key !== undefined && current !== undefined) env[key] = expandValue(current, env)
   }
   return { env, source: 'registry' }
 }
@@ -1176,6 +1199,9 @@ function readEnvKey(keyPath) {
   const file = nodePath.join(nodePath.dirname(LOG),
     'env-' + process.pid + '-' + Math.random().toString(36).slice(2) + '.reg');
   try {
+    // Created first with a restrictive mode so reg export's overwrite keeps this
+    // file's ACL instead of whatever the directory would hand a new file.
+    try { fs.closeSync(fs.openSync(file, 'w', 0o600)) } catch {}
     execFileSync('reg', ['export', keyPath, file, '/y'], { windowsHide: true, stdio: 'ignore' });
     const raw = fs.readFileSync(file);
     const text = raw.length > 1 && raw[0] === 0xff && raw[1] === 0xfe
