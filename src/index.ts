@@ -1752,6 +1752,8 @@ export type PowerTrustRejectReason =
   | 'host-fence'
   /** The deployment admitted the request; its browser authentication did not. */
   | 'not-authenticated'
+  /** The deployment's browser-trust check exists but failed to answer. */
+  | 'host-check-failed'
 
 /** The loopback hostnames this fence accepts, matching upstream. */
 const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', '::1', '[::1]', 'localhost'])
@@ -1943,6 +1945,23 @@ export function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0' {
 }
 
 /**
+ * What the deployment's own fence decided, kept apart from "it is not there".
+ *
+ * `failed` is deliberately not merged into `absent`: falling back to this plugin's
+ * own rules when the deployment's check breaks would silently drop its browser
+ * authentication, leaving origin rules that never authenticated anyone.
+ */
+export type HostFenceVerdict =
+  /** No `connection` service: only this plugin's own fence can decide. */
+  | { kind: 'absent' }
+  /** The deployment checked the request and let it through, authentication included. */
+  | { kind: 'admitted' }
+  /** The deployment refused it; forward the status it chose. */
+  | { kind: 'refused'; status: 401 | 403 }
+  /** The deployment has the check but it threw or answered outside its contract. */
+  | { kind: 'failed' }
+
+/**
  * Apply the deployment's own browser-trust fence and browser authentication.
  *
  * This plugin's route is longer than the host's `/api` prefix, so longest-prefix
@@ -1954,28 +1973,32 @@ export function boundHostOf(ctx: any): '127.0.0.1' | '0.0.0.0' {
  * taken from it wherever it exists.
  * @param ctx - host context.
  * @param req - the incoming request.
- * @returns the status the deployment refused with, `undefined` when it admitted
- * the request, or `null` when the host exposes no connection service.
+ * @returns which authority decided: the deployment refused, admitted, was absent,
+ * or has the check but could not answer.
  */
 export function connectionRejection(
   ctx: any,
   req: { headers: Record<string, unknown> },
-): 401 | 403 | undefined | null {
+): HostFenceVerdict {
   // Read through `ctx.get`: `connection` is not one of this plugin's injected
   // services, so a property read resolves to undefined and would silently skip
   // the host's own fence.
   const connection = ctx?.get?.('connection') as
     | { requestRejection?: (request: { headers: unknown }) => unknown }
     | undefined
-  if (typeof connection?.requestRejection !== 'function') return null
+  if (typeof connection?.requestRejection !== 'function') return { kind: 'absent' }
   try {
     const rejection: unknown = connection.requestRejection({ headers: req.headers })
-    if (rejection === 401 || rejection === 403) return rejection
-    // Anything else means the host admitted it. A host that throws is not
-    // treated as admitting: `null` falls back to this plugin's own fence.
-    return rejection === undefined ? undefined : null
+    if (rejection === 401 || rejection === 403) return { kind: 'refused', status: rejection }
+    if (rejection === undefined) return { kind: 'admitted' }
+    // Outside the documented `401 | 403 | undefined` answer: this build cannot
+    // read it, which is not the same as being admitted.
+    return { kind: 'failed' }
   } catch {
-    return null
+    // The deployment HAS the check and it threw. Treating that as "no such
+    // service" would drop its browser authentication and leave only this plugin's
+    // origin rules, which never authenticated anyone.
+    return { kind: 'failed' }
   }
 }
 
@@ -1999,6 +2022,8 @@ const TRUST_REJECT_HINTS: Record<PowerTrustRejectReason, string> = {
     "The deployment's own /api browser-trust fence refused this request. Which authorities it serves is its decision, not this plugin's — see the host's trustedHosts configuration or its --trusted-host flag.",
   'not-authenticated':
     'The deployment admitted the request but this browser is not authenticated for it. Reload the UI through its launch URL to establish a session.',
+  'host-check-failed':
+    "The deployment has a browser-trust check but it failed to answer, so this request is refused rather than downgraded to origin checks alone. Check the host's logs for the underlying error.",
 }
 
 /**
@@ -2112,17 +2137,23 @@ export function apply(ctx: any, config: Config) {
         // Prefer the deployment's own fence and authentication: it knows the
         // authorities that exist at runtime, including the LAN literals a Web
         // runtime derives from an all-interface bind, and the operator declares
-        // them in one place. `null` means this host has no such service, and
+        // them in one place. `absent` means this host has no such service, and
         // this plugin's own fence is then the guard.
-        const hostRejection = connectionRejection(ctx, req)
-        if (hostRejection === null) {
+        const hostFence = connectionRejection(ctx, req)
+        if (hostFence.kind === 'failed') {
+          // Fail closed. The check exists and could not answer, so the request is
+          // refused rather than downgraded to origin checks that never
+          // authenticated anyone.
+          return refuse('host-check-failed', 403)
+        }
+        if (hostFence.kind === 'absent') {
           // The host's `--trusted-host` declarations, so an authority DSH serves
           // is not refused for not being loopback; and the address it actually
           // listens on, which decides whether an off-box peer is even possible.
           const verdict = explainPowerRequestTrust(req, declaredTrustedHosts(ctx), boundHostOf(ctx))
           if (!verdict.trusted) return refuse(verdict.reason, 403)
-        } else if (hostRejection !== undefined) {
-          return refuse(hostRejection === 401 ? 'not-authenticated' : 'host-fence', hostRejection)
+        } else if (hostFence.kind === 'refused') {
+          return refuse(hostFence.status === 401 ? 'not-authenticated' : 'host-fence', hostFence.status)
         }
       }
       try {

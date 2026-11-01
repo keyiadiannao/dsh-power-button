@@ -277,32 +277,34 @@ describe('connectionRejection', () => {
   })
 
   it('passes through the host\u2019s 403 and 401', () => {
-    expect(connectionRejection(withConnection(403), { headers: {} })).toBe(403)
-    expect(connectionRejection(withConnection(401), { headers: {} })).toBe(401)
+    expect(connectionRejection(withConnection(403), { headers: {} })).toEqual({ kind: 'refused', status: 403 })
+    expect(connectionRejection(withConnection(401), { headers: {} })).toEqual({ kind: 'refused', status: 401 })
   })
 
-  it('reports admission as undefined, not as a refusal', () => {
-    expect(connectionRejection(withConnection(undefined), { headers: {} })).toBeUndefined()
+  it('reports admission as its own verdict, not as a refusal', () => {
+    expect(connectionRejection(withConnection(undefined), { headers: {} })).toEqual({ kind: 'admitted' })
   })
 
-  it('reports null when the host exposes no connection service, so its own fence applies', () => {
-    expect(connectionRejection({}, { headers: {} })).toBeNull()
-    expect(connectionRejection({ get: () => undefined }, { headers: {} })).toBeNull()
-    expect(connectionRejection({ get: () => ({}) }, { headers: {} })).toBeNull()
+  it('reports absence when the host exposes no connection service, so its own fence applies', () => {
+    expect(connectionRejection({}, { headers: {} })).toEqual({ kind: 'absent' })
+    expect(connectionRejection({ get: () => undefined }, { headers: {} })).toEqual({ kind: 'absent' })
+    expect(connectionRejection({ get: () => ({}) }, { headers: {} })).toEqual({ kind: 'absent' })
   })
 
-  it('treats a throwing host as unavailable rather than as admitting the request', () => {
-    // Reading "it threw" as "let it through" would turn a broken host into an
-    // open destructive endpoint.
+  it('separates a failing host check from an absent one', () => {
+    // These must not collapse into "absent": the route refuses on `failed` and
+    // only falls back to this plugin's own rules on `absent`. Folding them would
+    // drop the deployment's browser authentication and leave origin checks that
+    // never authenticated anyone.
     const throwing = { get: () => ({ requestRejection: () => { throw new Error('boom') } }) }
-    expect(connectionRejection(throwing, { headers: {} })).toBeNull()
+    expect(connectionRejection(throwing, { headers: {} })).toEqual({ kind: 'failed' })
   })
 
-  it('does not accept an unexpected return value as admission', () => {
-    // Only `undefined` means the host admitted it; anything else is a host this
-    // build does not understand, so the local fence stays the guard.
-    expect(connectionRejection(withConnection('ok'), { headers: {} })).toBeNull()
-    expect(connectionRejection(withConnection(200), { headers: {} })).toBeNull()
+  it('does not read an unexpected return value as admission', () => {
+    // Only `undefined` means the host admitted it; anything else is an answer this
+    // build cannot interpret, which is a failure to check rather than a pass.
+    expect(connectionRejection(withConnection('ok'), { headers: {} })).toEqual({ kind: 'failed' })
+    expect(connectionRejection(withConnection(200), { headers: {} })).toEqual({ kind: 'failed' })
   })
 
   it('reads through ctx.get, not the property', () => {
@@ -313,7 +315,7 @@ describe('connectionRejection', () => {
       get: (n: string) => { asked = n; return { requestRejection: () => 403 } },
       connection: { requestRejection: () => undefined },
     }
-    expect(connectionRejection(ctx, { headers: {} })).toBe(403)
+    expect(connectionRejection(ctx, { headers: {} })).toEqual({ kind: 'refused', status: 403 })
     expect(asked).toBe('connection')
   })
 })
