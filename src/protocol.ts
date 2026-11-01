@@ -29,9 +29,3 @@ export const RESTART_READY_WAIT_MS = 180_000
  * session-log quiescence, registry reads, and spawn retries.
  */
 export const RESTART_FLOW_WAIT_MS = RESTART_READY_WAIT_MS + 120_000
-
-/** Upper bound for one browser request, including its response body. */
-export const BROWSER_REQUEST_WAIT_MS = 5_000
-
-/** Upper bound for observing an acknowledged shutdown. */
-export const SHUTDOWN_FLOW_WAIT_MS = 40_000

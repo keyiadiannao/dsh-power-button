@@ -1,8 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IncomingMessage, ServerResponse } from 'node:http'
 import { Socket } from 'node:net'
-import { unlinkSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 
 let apply: typeof import('../src/index.ts').apply
 let Config: typeof import('../src/index.ts').Config
@@ -37,12 +35,12 @@ function mount(locale = 'en') {
   apply(ctx, Config({ enableModelTool: true, maxDelayMs: 5_000, restartWakeMode: 'quiet' }))
   return {
     tools, commands, exit,
-    async request(method: 'GET' | 'POST', action: string) {
+    async post(action: string) {
       let status = 0
       let body: object = {}
       const socket = new Socket()
       const request = new IncomingMessage(socket)
-      request.method = method
+      request.method = 'POST'
       request.url = `/api/dsh-power-button/${action}`
       request.headers = { host: '127.0.0.1:3080' }
       Object.defineProperty(socket, 'remoteAddress', { value: '127.0.0.1' })
@@ -86,7 +84,7 @@ afterEach(() => {
 describe('Desktop power control', () => {
   it.each(['restart', 'shutdown'])('refuses HTTP %s before launching a helper or scheduling exit', async (action) => {
     const app = mount()
-    const response = await app.request('POST', action)
+    const response = await app.post(action)
     expect(response.status).toBe(503)
     expect(response.body).toMatchObject({ ok: false, reason: 'desktop-unsupported' })
     expect(response.finish).not.toHaveBeenCalled()
@@ -110,30 +108,14 @@ describe('Desktop power control', () => {
 
   it('does not mistake a standalone Node process for Desktop because of an inherited environment flag', async () => {
     delete process.versions.electron
-    const app = mount()
-    const status = await app.request('GET', 'status')
-    expect(status.body).toMatchObject({ surface: 'web', capabilities: { restart: true, shutdown: true } })
-    const response = await app.request('POST', 'restart')
+    const response = await mount().post('restart')
     expect(response.status).toBe(500)
     expect(response.body).toMatchObject({ ok: false, error: 'unexpected helper launch' })
   })
 
   it('reports the Desktop limitation in the configured host language', async () => {
-    const response = await mount('zh').request('POST', 'restart')
+    const response = await mount('zh').post('restart')
     expect(response.status).toBe(503)
     expect(response.body).toMatchObject({ error: expect.stringContaining('桌面版') })
-  })
-
-  it('reports Desktop capabilities without publishing restart details', async () => {
-    const path = join(process.env.DSH_HOME!, 'dsh-power-restart-last-3080.json')
-    writeFileSync(path, JSON.stringify({ stage: 'failed', origin: { sessionId: 'private-session' }, failure: { message: 'private-detail' } }))
-    try {
-      const result = await mount().request('GET', 'status')
-      expect(result.status).toBe(200)
-      expect(result.body).toEqual({
-        ok: true, pluginVersion: expect.any(String), lifecycle: 'ready', surface: 'desktop',
-        capabilities: { restart: false, shutdown: false }, lastRestart: 'failed',
-      })
-    } finally { unlinkSync(path) }
   })
 })

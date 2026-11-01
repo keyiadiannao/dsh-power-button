@@ -11,14 +11,13 @@
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { RESTART_FLOW_WAIT_MS, SHUTDOWN_FLOW_WAIT_MS, SHUTDOWN_CONFIRM_REQUEST, SHUTDOWN_CONFIRM_REQUEST_LEGACY } from '../protocol.ts'
+import { RESTART_FLOW_WAIT_MS, SHUTDOWN_CONFIRM_REQUEST, SHUTDOWN_CONFIRM_REQUEST_LEGACY } from '../protocol.ts'
 import { RestartButton } from './RestartButton.tsx'
 import { RestartNotice } from './RestartNotice.tsx'
 import { RestartOverlay } from './RestartOverlay.tsx'
 import { RestartPreparing } from './RestartPreparing.tsx'
 import { ShutdownConfirmDialog } from './ShutdownConfirmDialog.tsx'
 import { en, zh } from './locales.ts'
-import { objectValue, requestJson } from './request.ts'
 
 /** Required services. */
 export const inject = ['slots', 'locale']
@@ -96,7 +95,6 @@ export type RestartPhase = 'idle' | 'preparing' | 'shutting' | 'waiting' | 'reco
 let phase: RestartPhase = 'idle'
 let action: PowerAction = 'restart'
 let errorMsg: string | null = null
-let errorRetryable = false
 const listeners = new Set<() => void>()
 
 /** Locale service captured at apply time; used to translate module-scope
@@ -116,17 +114,13 @@ function emit(): void {
 export function getRestartPhase(): RestartPhase { return phase }
 export function getPowerAction(): PowerAction { return action }
 export function getRestartError(): string | null { return errorMsg }
-export function getRestartRetryable(): boolean { return errorRetryable }
 
 /** Surface an error, unless the flow has already moved past the point of no return. */
-function fail(msg: string, retryable = false): void {
+function fail(msg: string): void {
   if (phase === 'error' || phase === 'recovering') return
   operationId += 1
-  stopCurrentOperation?.()
-  stopCurrentOperation = undefined
   phase = 'error'
   errorMsg = msg
-  errorRetryable = retryable
   emit()
 }
 
@@ -166,7 +160,6 @@ function describeFailure(body: unknown, status: number): string {
  * previous operation check it and stop. Prevents an old health poll from
  * overwriting a newer flow's phase (e.g. error → waiting on retry). */
 let operationId = 0
-let stopCurrentOperation: (() => void) | undefined
 
 /** Kick a restart or shutdown. Opens the overlay and drives the flow.
  * Restart goes through a brief `preparing` stage first (a small corner hint,
@@ -175,28 +168,12 @@ let stopCurrentOperation: (() => void) | undefined
  * alive; the full-screen overlay only appears once the connection is about to
  * actually drop. */
 export function beginPower(next: PowerAction): void {
-  stopCurrentOperation?.()
   const myOperation = ++operationId
   const active = (): boolean => myOperation === operationId
-  const controller = new AbortController()
-  const timers = new Set<ReturnType<typeof setTimeout>>()
-  const schedule = (fn: () => void, ms: number): void => {
-    const timer = setTimeout(() => { timers.delete(timer); fn() }, ms)
-    timers.add(timer)
-  }
-  const stop = (): void => {
-    controller.abort()
-    for (const timer of timers) clearTimeout(timer)
-    timers.clear()
-  }
-  stopCurrentOperation = stop
   action = next
   errorMsg = null
-  errorRetryable = false
 
   const endpoint = next === 'shutdown' ? '/api/dsh-power-button/shutdown' : '/api/dsh-power-button/restart'
-  const timeout = next === 'shutdown' ? SHUTDOWN_FLOW_WAIT_MS : RESTART_FLOW_WAIT_MS
-  schedule(() => fail(tl(next === 'shutdown' ? 'shutdownNoEffect' : 'restartTimeout')), timeout)
 
   if (next === 'restart') {
     // Stage 1: corner hint, page stays fully usable.
@@ -205,7 +182,7 @@ export function beginPower(next: PowerAction): void {
     // Stage 2: after a short beat (POST delivered, flush underway) switch to
     // the full-screen lifecycle overlay. Bound: never skip to the overlay if
     // a newer operation superseded this one.
-    schedule(() => {
+    setTimeout(() => {
       if (!active() || phase !== 'preparing') return
       phase = 'shutting'
       emit()
@@ -216,45 +193,61 @@ export function beginPower(next: PowerAction): void {
     emit()
   }
 
-  let accepted = false
-  let restartId: string | null = null
-  const send = (): void => {
-    void requestJson(endpoint, { method: 'POST', keepalive: true, signal: controller.signal }, timeout).then((response) => {
-      if (!active() || response.kind !== 'response') return
-      const body = objectValue(response.body)
-      if (!response.ok || body?.ok === false) {
-        fail(describeFailure(response.body, response.status), response.status !== 409)
-      } else if (body?.ok === true) {
-        accepted = true
-        restartId = typeof body.restartId === 'string' ? body.restartId : null
-      }
-    })
-  }
-
+  // Shutdown: fire-and-forget the POST (keepalive survives the page/process
+  // lifecycle), then poll health. The process exits and never comes back —
+  // once we observe repeated DOWNs, settle on the final "已关机" screen. No
+  // reload: the page must not bounce back to a dead server.
   if (next === 'shutdown') {
-    send()
+    void fetch(endpoint, { method: 'POST', keepalive: true })
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}))
+        if (!active()) return
+        if (!r.ok || (j as { ok?: boolean })?.ok === false) {
+          fail(describeFailure(j, r.status))
+        }
+      })
+      .catch(() => { /* polls observe the outage */ })
+    const SHUTDOWN_POLL_MS = 500
+    const SHUTDOWN_TIMEOUT_MS = 40_000
+    const MAX_ATTEMPTS = SHUTDOWN_TIMEOUT_MS / SHUTDOWN_POLL_MS
+    let attempts = 0
     let downStreak = 0
-    const poll = async (): Promise<void> => {
-      const result = await requestJson('/api/dsh-power-button/health', { cache: 'no-store', signal: controller.signal })
-      if (!active()) return
-      // A timeout or any HTTP response is not evidence that the Host is down.
-      downStreak = result.kind === 'unavailable' ? downStreak + 1 : 0
-      if (accepted && downStreak >= 3) {
-        stop()
-        stopCurrentOperation = undefined
-        operationId += 1
-        phase = 'off'
+    const timer = setInterval(async () => {
+      if (!active()) { clearInterval(timer); return }
+      attempts += 1
+      // Timeout: never claim success without observing the process actually
+      // go down — that would be a false "已关机".
+      if (attempts >= MAX_ATTEMPTS) {
+        clearInterval(timer)
+        phase = 'error'
+        errorMsg = tl('shutdownNoEffect')
         emit()
         return
       }
-      schedule(() => { void poll() }, 500)
-    }
-    schedule(() => { void poll() }, 500)
+      let up = false
+      try {
+        const r = await fetch('/api/dsh-power-button/health', { cache: 'no-store' })
+        up = r.ok
+      } catch { up = false }
+      if (!active()) { clearInterval(timer); return }
+      if (!up) {
+        // Require a short streak of DOWNs (a single transient blip must not
+        // declare "已关机").
+        downStreak += 1
+        if (downStreak >= 3) {
+          clearInterval(timer)
+          phase = 'off'
+          emit()
+        }
+      } else {
+        downStreak = 0
+      }
+    }, SHUTDOWN_POLL_MS)
     return
   }
 
   // Brief beat on the closing caption, then move to waiting.
-  schedule(() => {
+  setTimeout(() => {
     if (!active()) return
     if (phase === 'shutting') {
       phase = 'waiting'
@@ -262,37 +255,97 @@ export function beginPower(next: PowerAction): void {
     }
   }, 600)
 
-  // Capture the baseline before sending the request. An acknowledged restart
-  // ID, when present, identifies the exact successor even without a baseline.
+  // Restart: capture THIS operation's baseline instanceId FIRST (not the
+  // page-load one — the server may have been restarted manually since, which
+  // would make the old baseline a false "already changed"), then POST, then
+  // poll. Success is authoritative when the instanceId changes from the
+  // operation baseline (old A → new B). A captured baseline makes seenDown
+  // alone insufficient (a transient network blip on the still-old instance
+  // must not fake success); seenDown is only the fallback when NO baseline
+  // could be captured at all.
   void (async () => {
-    const initial = await requestJson('/api/dsh-power-button/health', { cache: 'no-store', signal: controller.signal })
+    let baseline: string | null = null
+    try {
+      const r = await fetch('/api/dsh-power-button/health', { cache: 'no-store' })
+      if (r.ok) {
+        const j = await r.json().catch(() => ({})) as { instanceId?: string }
+        if (typeof j.instanceId === 'string') baseline = j.instanceId
+      }
+    } catch { /* baseline stays null → seenDown fallback */ }
+
     if (!active()) return
-    const initialBody = initial.kind === 'response' && initial.ok ? objectValue(initial.body) : null
-    const baseline = typeof initialBody?.instanceId === 'string' ? initialBody.instanceId : null
-    send()
+
+    // Fire the restart POST now that the baseline is captured.
+    void fetch('/api/dsh-power-button/restart', { method: 'POST', keepalive: true })
+      .then(async (r) => {
+        const j = await r.json().catch(() => ({}))
+        if (!active()) return
+        if (!r.ok || (j as { ok?: boolean })?.ok === false) {
+          fail(describeFailure(j, r.status))
+        }
+      })
+      .catch(() => { /* polls observe the outage */ })
+
+    // Serial (single-flight) polling: each round awaits the fetch before the
+    // next timer is scheduled, so overlapping polls cannot race the state.
+    let seenDown = false
+    let upTicks = 0
+    let attempts = 0
+    const POLL_MS = 1000
+    const MAX_ATTEMPTS = Math.ceil(RESTART_FLOW_WAIT_MS / POLL_MS)
+
     const poll = async (): Promise<void> => {
-      const result = await requestJson('/api/dsh-power-button/health', { cache: 'no-store', signal: controller.signal })
       if (!active()) return
-      if (result.kind === 'unavailable') {
+      attempts += 1
+      if (attempts > MAX_ATTEMPTS) {
+        phase = 'error'
+        errorMsg = tl('restartTimeout')
+        emit()
+        return
+      }
+      let up = false
+      let instanceChanged = false
+      try {
+        const r = await fetch('/api/dsh-power-button/health', { cache: 'no-store' })
+        up = r.ok
+        if (r.ok) {
+          const j = await r.json().catch(() => ({})) as { instanceId?: string }
+          instanceChanged = baseline !== null
+            && typeof j.instanceId === 'string'
+            && j.instanceId !== baseline
+        }
+      } catch { up = false }
+      if (!active()) return
+
+      if (!up) {
+        seenDown = true
+        upTicks = 0
         if (phase !== 'waiting') {
           phase = 'waiting'
           emit()
         }
-      } else if (result.kind === 'response' && result.ok) {
-        const body = objectValue(result.body)
-        const claimed = objectValue(body?.restart)
-        const confirmed = accepted && (restartId !== null
-          ? claimed?.restartId === restartId
-          : baseline !== null && typeof body?.instanceId === 'string' && body.instanceId !== baseline)
+      } else {
+        const confirmed = baseline !== null
+          ? instanceChanged // authoritative: a different process answered
+          : (seenDown && up) // fallback: real down followed by an up
         if (confirmed) {
-          stop()
           phase = 'recovering'
           emit()
-          schedule(() => { if (active()) window.location.reload() }, 1300)
+          // Let the ring transition to 100% (1.1s) before reloading.
+          setTimeout(() => { if (active()) window.location.reload() }, 1300)
+          return
+        }
+        // Up without confirmation: allow ~20s for the POST to be delivered
+        // (it can queue behind the app's streams) before declaring failure.
+        upTicks += 1
+        if (upTicks >= 20) {
+          phase = 'error'
+          errorMsg = tl('restartNoEffect')
+          emit()
           return
         }
       }
-      schedule(() => { void poll() }, 1000)
+      setTimeout(poll, POLL_MS)
     }
     void poll()
   })()
@@ -304,11 +357,8 @@ export function beginPower(next: PowerAction): void {
  * the dialog and let the user act (refresh manually if they wish). */
 export function dismissPower(): void {
   operationId += 1 // invalidate any stale timers
-  stopCurrentOperation?.()
-  stopCurrentOperation = undefined
   phase = 'idle'
   errorMsg = null
-  errorRetryable = false
   emit()
 }
 
@@ -361,11 +411,6 @@ export function apply(ctx: ClientContext & ClientServices): void {
 
   // Capture the locale service for module-scope (non-component) error strings.
   localeSvc = ctx.locale as { snapshot: { active: string } }
-  ctx.effect(() => () => {
-    dismissPower()
-    cancelShutdownConfirm()
-    localeSvc = undefined
-  }, 'dsh-power-button: power flow cleanup')
 
   // Self-contained layout fix: this plugin's footer button is full-width
   // (width: calc(100% + 8px)), so it needs the sidebar's footer-actions
