@@ -147,72 +147,73 @@ export function markerPath(): string {
 }
 
 /**
- * Announce the port this process bound to a restart helper that is waiting for it.
+ * Protocol generation the Desktop shell advertises when it can own a restart.
  *
- * The helper knows the OLD process's port and nothing else. On the Web surface
- * the relaunch argv carries `--port`, so the successor lands on the same port and
- * the helper's probe finds it. The Desktop host is different: it launches the
- * web app with a hardcoded `--port 0` inside `runProfile()` and never reads
- * `--port` from its own argv, so the successor always gets a fresh OS-chosen
- * port. Without this handshake the helper probes the old port until its
- * readiness deadline and reports a false `health-timeout` while a perfectly
- * healthy successor sits on another port.
- *
- * Written unconditionally: a normal (non-restart) boot just refreshes the file,
- * and only a helper whose restartId matches will consume it. Best-effort, so a
- * read-only Harness home cannot block plugin activation.
- * @param port - the port this instance actually bound.
+ * The shell spawns the Host with this variable once it accepts a restart request. Its
+ * presence is the capability: argv and profile names describe how the process was
+ * launched, not which lifecycle protocol the shell actually speaks.
  */
-function writePortHandshake(port: number): void {
-  if (!Number.isInteger(port) || port <= 0) return
-  try {
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
-    const payload = {
-      port,
-      instanceId: INSTANCE_ID,
-      restartId: process.env.DSH_POWER_RESTART_ID ?? null,
-      pid: process.pid,
-      writtenAt: new Date().toISOString(),
-    }
-    fs.writeFileSync(portHandshakePath(port), JSON.stringify(payload), { encoding: "utf8", mode: 0o600 })
-  } catch {}
-}
+const DESKTOP_RESTART_PROTOCOL_ENV = 'DSH_DESKTOP_RESTART_PROTOCOL'
 
-/** Path of the port handshake for one bound port. */
-function portHandshakePath(port: number): string {
-  return path.join(RUNTIME_DIR, `dsh-power-port-${port}.json`)
-}
-
-/** Path of the shell-facing restart intent signal (fixed name, see below). */
-const DESKTOP_RESTART_INTENT_FILE = path.join(RUNTIME_DIR, "dsh-power-desktop-restart.json")
+/** Restart identity the Desktop shell injects into the Host it respawned. */
+const DESKTOP_RESTART_ID_ENV = 'DSH_DESKTOP_RESTART_ID'
 
 /**
- * Fixed-name signal file the Desktop (Electron) shell reads to tell a REQUESTED
- * restart apart from a crash.
+ * Whether this Host can hand its restart to the Desktop shell.
  *
- * The shell owns this process and relaunches the whole application when its Host
- * child exits, but its child-close handler cannot distinguish "the user pressed
- * Restart" from "the Host died" — so an intentional restart showed the fatal
- * recovery dialog. The shell has no access to this process's port, so the name
- * must be fixed rather than port-keyed. The shell consumes (deletes) it before
- * acting, which keeps a later ordinary launch from inheriting the intent.
- *
- * Written before the exit is requested, so the file is always present by the
- * time the shell observes the child closing. Best-effort: a read-only home must
- * not prevent the restart from being requested.
- * @param restartId - identity of the restart this exit belongs to.
+ * Both halves are required: the shell must advertise the protocol, and the IPC channel
+ * the request travels over must be connected. A Host that satisfies only one of them
+ * falls back to the detached-helper restart instead of exiting into nothing.
  */
-function writeDesktopRestartIntent(restartId: string): void {
+/**
+ * The protocol generation a shell advertised, or undefined when it advertised none.
+ *
+ * A malformed value is not a weaker advertisement: Number() turns it into NaN, which
+ * compares false against every bound, so it is rejected explicitly instead.
+ * @param advertised - raw value of the protocol variable, or undefined.
+ * @returns the generation when it is a positive integer.
+ */
+export function advertisedDesktopRestartProtocol(advertised: string | undefined): number | undefined {
+  if (advertised === undefined || advertised === '') return undefined
+  const generation = Number(advertised)
+  return Number.isInteger(generation) && generation >= 1 ? generation : undefined
+}
+
+/**
+ * Whether this Host can hand its restart to the Desktop shell.
+ *
+ * Both halves are required: the shell must advertise the protocol, and the IPC channel
+ * the request travels over must be connected. A host that satisfies only one of them
+ * falls back to the detached-helper restart instead of exiting into nothing.
+ */
+export function desktopShellRestartAvailable(): boolean {
+  if (advertisedDesktopRestartProtocol(process.env[DESKTOP_RESTART_PROTOCOL_ENV]) === undefined) return false
+  return typeof process.send === 'function' && process.connected === true
+}
+
+/**
+ * Ask the Desktop shell to restart the application.
+ *
+ * The shell owns the relaunch: this process is its child, so a detached helper here
+ * would start a second Host with no window and no IPC. Resolving means the shell took
+ * the request; it does not mean the successor is already up.
+ * @param restartId - identity of the restart being handed over.
+ * @returns whether the shell accepted the request.
+ */
+async function requestShellRestart(restartId: string): Promise<boolean> {
+  const send = process.send
+  if (typeof send !== 'function' || process.connected !== true) return false
   try {
-    fs.mkdirSync(RUNTIME_DIR, { recursive: true, mode: 0o700 })
-    fs.writeFileSync(DESKTOP_RESTART_INTENT_FILE, JSON.stringify({
-      schemaVersion: 1,
-      kind: "restart",
-      restartId,
-      pid: process.pid,
-      requestedAt: new Date().toISOString(),
-    }), { encoding: "utf8", mode: 0o600 })
-  } catch {}
+    await new Promise<void>((resolve, reject) => {
+      send.call(process, { type: 'desktop-restart-requested', restartId }, (error: Error | null) => {
+        if (error === null || error === undefined) resolve()
+        else reject(error)
+      })
+    })
+    return true
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -333,8 +334,12 @@ function readRestartOrigin(value: unknown): RestartOrigin | undefined {
 export function consumeRestartConfirmation(): { fromInstanceId: string, restartId?: string, origin?: RestartOrigin } | null {
   // Read-and-delete the launch token FIRST: it belongs to this boot's judgment
   // only, and must not leak to MCP children or survive into a later decision.
-  const envRestartId = process.env.DSH_POWER_RESTART_ID
+  // Two launch identities exist: the helper's token on the Web surface, and the
+  // Desktop shell's token after it respawned this Host. Either one is authoritative for
+  // this process, and neither may leak into a child or a later decision.
+  const envRestartId = process.env.DSH_POWER_RESTART_ID ?? process.env[DESKTOP_RESTART_ID_ENV]
   delete process.env.DSH_POWER_RESTART_ID
+  delete process.env[DESKTOP_RESTART_ID_ENV]
   // Markers are keyed by the port the OLD process held. A successor that came up
   // on a different port (the Desktop host's hardcoded `--port 0`, which its argv
   // never exposes) therefore looks in the wrong file and would never claim its
@@ -752,23 +757,6 @@ const DESKTOP_EXIT_FLUSH_CAP_MS = 1_500
  */
 const DESKTOP_EXIT_WATCHDOG_MS = 1_500
 
-/**
- * Whether this Host runs as a child of the Desktop (Electron) shell.
- *
- * The shell launches this process as `node …/dsh-desktop-host/lib/index.js` with
- * an IPC channel, so the entry script names the package. That is a property of
- * THIS process's own command line — not of the profile, the port, or the
- * environment, all of which the same Host shares with a plain `dsh web` launch —
- * so it identifies the shell reliably without guessing.
- * @returns true when the Desktop shell owns this process.
- */
-function isDesktopHostProcess(): boolean {
-  for (const arg of process.argv) {
-    if (typeof arg === "string" && /[\\/]dsh-desktop-host[\\/]lib[\\/]index\.js$/u.test(arg)) return true
-  }
-  // The shell always supplies an IPC channel to its Host; a standalone CLI does not.
-  return typeof process.send === "function" && process.connected === true && process.env.DSH_PROFILE === "desktop"
-}
 
 /**
  * Request the launcher's bounded process exit, falling back to
@@ -1162,15 +1150,6 @@ export interface RestartHelperPayload {
   commitFile: string
   logFile: string
   serverLog: string
-  /**
-   * Directory holding the per-port handshake files the successor writes.
-   *
-   * The helper cannot derive the successor's port from the payload, so it
-   * watches this directory for the file that process publishes from the port it
-   * actually bound. Defaulted to the marker's directory for callers that omit
-   * it, so an existing payload shape keeps working.
-   */
-  handshakeDir?: string
   sessionsRoot: string
   commitWaitMs: number
   readyWaitMs: number
@@ -1381,7 +1360,6 @@ const LAST_STATUS = ${JSON.stringify(p.lastStatusFile)};
 const COMMIT = ${JSON.stringify(p.commitFile)};
 const LOG = ${JSON.stringify(p.logFile)};
 const SERVER_LOG = ${JSON.stringify(p.serverLog)};
-const HANDSHAKE_DIR = ${JSON.stringify(p.handshakeDir ?? path.dirname(p.markerFile))};
 const SESSIONS_ROOT = ${JSON.stringify(p.sessionsRoot)};
 const COMMIT_WAIT_MS = ${p.commitWaitMs};
 const READY_WAIT_MS = ${p.readyWaitMs};
@@ -1548,63 +1526,10 @@ function sessionsQuiescent(maxWaitMs) {
     }
     return false;
   }
-  // The port the successor actually bound. It is NOT always PORT: the Desktop
-  // host launches the web app with a hardcoded --port 0 inside runProfile()
-  // and never reads --port from its own argv, so the successor lands on a fresh
-  // OS-chosen port every time. Two channels can reveal it, and the first is the
-  // authoritative one:
-  //   1. the successor's port handshake file, written by the plugin running IN
-  //      that process from the port it actually bound;
-  //   2. its "dsh web: http://127.0.0.1:<port>/" stdout line, which this helper
-  //      already tees into SERVER_LOG (a human-readable log, so only a fallback).
-  // PORT stays the expected case and covers the ordinary same-port relaunch.
-  let effectivePort = PORT;
-  // Offset in SERVER_LOG at spawn time, so the fallback reads only this spawn's
-  // output: the log is append-only and shared across every restart of this
-  // machine, and its older lines announce ports of DEAD processes.
-  let serverLogStart = 0;
-  function markServerLogStart() {
-    try { serverLogStart = fs.statSync(SERVER_LOG).size; } catch { serverLogStart = 0; }
-  }
-  function discoverPort() {
-    // 1. Handshake file: any port this machine announced after this spawn began.
-    try {
-      const names = fs.readdirSync(HANDSHAKE_DIR);
-      let best = null;
-      for (const name of names) {
-        if (!/^dsh-power-port-\\d+\\.json$/u.test(name)) continue;
-        const file = nodePath.join(HANDSHAKE_DIR, name);
-        let record;
-        let stat;
-        try {
-          stat = fs.statSync(file);
-          record = JSON.parse(fs.readFileSync(file, 'utf8'));
-        } catch { continue; }
-        if (record === null || typeof record !== 'object') continue;
-        if (!Number.isInteger(record.port) || record.port <= 0) continue;
-        if (stat.mtimeMs < REQUESTED_AT_MS) continue;
-        if (record.instanceId === OLD_INSTANCE) continue;
-        if (best === null || stat.mtimeMs > best.mtimeMs) best = { port: record.port, mtimeMs: stat.mtimeMs };
-      }
-      if (best !== null) return best.port;
-    } catch {}
-    // 2. Fallback: the successor's own URL line in this spawn's stdout slice.
-    try {
-      const text = fs.readFileSync(SERVER_LOG, 'utf8');
-      const fresh = text.slice(serverLogStart);
-      const matches = [...fresh.matchAll(/dsh web: http:\\/\\/127\\.0\\.0\\.1:(\\d+)\\//g)];
-      if (matches.length > 0) {
-        const port = Number(matches[matches.length - 1][1]);
-        if (Number.isInteger(port) && port > 0) return port;
-      }
-    } catch {}
-    return null;
-  }
-  function getHealth(port) {
-    const target = port ?? effectivePort;
+  function getHealth() {
     return new Promise((resolve) => {
       const req = http.get({
-        host: '127.0.0.1', port: target, path: '/api/dsh-power-button/health', timeout: 2000,
+        host: '127.0.0.1', port: PORT, path: '/api/dsh-power-button/health', timeout: 2000,
       }, (res) => {
         let body = '';
         res.setEncoding('utf8');
@@ -1625,10 +1550,6 @@ function sessionsQuiescent(maxWaitMs) {
     const deadline = Date.now() + READY_WAIT_MS;
     while (Date.now() < deadline) {
       if (child.exitCode !== null) return null;
-      // Re-discover each tick: the successor announces its port only once its
-      // listener is up, which happens well after the spawn.
-      const discovered = discoverPort();
-      if (discovered !== null) effectivePort = discovered;
       const health = await getHealth();
       if (health && health.ok === true
         && typeof health.instanceId === 'string'
@@ -1649,9 +1570,6 @@ function sessionsQuiescent(maxWaitMs) {
       launchEnv = Object.assign(freshEnv().env, { DSH_POWER_RESTART_ID: RESTART_ID });
     }
     const out = fs.openSync(SERVER_LOG, 'a');
-    // Sample the append offset BEFORE the child exists, so discoverPort can tell
-    // this spawn's URL line apart from the ones earlier instances left behind.
-    markServerLogStart();
     let child;
     try {
       child = spawn(relaunch[0], relaunch.slice(1), {
@@ -1796,30 +1714,40 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     // recovered. So the only correct action here is to stop cleanly and let the
     // shell relaunch the whole application, instead of racing it with a second
     // Host.
-    if (isDesktopHostProcess()) {
-      // Record restart intent: the new process reads this to confirm it IS the
-      // restarted instance (its own instanceId differs from the recorded old).
-      writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
-      // Tell the Electron shell this exit is REQUESTED, so it relaunches the
-      // application instead of treating the exit as a crash.
-      writeDesktopRestartIntent(restartId)
-      // Flush the live sessions first, bounded, then exit. The flush is what
-      // guarantees the durable write lands: the Host's own `fiber.dispose()` has
-      // never completed inside any watchdog this plugin shipped, so waiting on
-      // it longer would only add latency without adding safety.
-      void flushSessionsBounded(ctx, DESKTOP_EXIT_FLUSH_CAP_MS).then((outcome) => {
-        logFlushOutcome("restart", outcome)
-        requestAppExit(ctx, hardExit, DESKTOP_EXIT_WATCHDOG_MS)
+    if (desktopShellRestartAvailable()) {
+      // The successor proves itself with this marker, found by restartId rather than
+      // by port: the shell respawns the whole application, and the Desktop Host binds
+      // a fresh OS-chosen port on every launch.
+      writeMarker({
+        schemaVersion: 2,
+        restartId,
+        fromInstanceId: INSTANCE_ID,
+        origin: origin ?? null,
+        requestedAt: new Date().toISOString(),
       })
+      // Flush before handing over: the shell tears this process down as part of the
+      // restart, so anything unwritten by then is lost. Bounded, and the outcome is
+      // logged rather than assumed.
+      const flushed = await flushSessionsBounded(ctx, DESKTOP_EXIT_FLUSH_CAP_MS)
+      logFlushOutcome('restart', flushed)
+      if (!await requestShellRestart(restartId)) {
+        return {
+          ok: false,
+          action: 'restart',
+          restartId,
+          error: 'the desktop shell did not accept the restart request',
+        }
+      }
       return {
         ok: true,
-        action: "restart",
+        action: 'restart',
         restartId,
         note: isEnglishLocale(ctx)
-          ? "DeepSeek Harness is restarting through the desktop shell: this window closes and the app relaunches itself."
-          : "DeepSeek Harness 正通过桌面外壳重启：窗口会关闭，应用会自行重新拉起。",
+          ? 'DeepSeek Harness is restarting through the desktop shell: this window closes and the app relaunches itself.'
+          : '\u6df1\u5ea6\u6c42\u7d22 Harness \u6b63\u901a\u8fc7\u684c\u9762\u5916\u58f3\u91cd\u542f\uff1a\u7a97\u53e3\u4f1a\u5173\u95ed\uff0c\u5e94\u7528\u4f1a\u81ea\u884c\u91cd\u65b0\u62c9\u8d77\u3002',
       }
     }
+
     // Record restart intent: the new process reads this to confirm it IS the
     // restarted instance (its own instanceId differs from the recorded old).
     writeMarker({ fromInstanceId: INSTANCE_ID, requestedAt: new Date().toISOString() })
@@ -1851,7 +1779,6 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
       commitFile: commitPathFor(restartId),
       logFile: LOG_FILE,
       serverLog,
-      handshakeDir: RUNTIME_DIR,
       sessionsRoot: path.join(RUNTIME_DIR, 'sessions'),
       commitWaitMs: HELPER_COMMIT_WAIT_MS,
       readyWaitMs: HELPER_READY_WAIT_MS,
@@ -2302,12 +2229,6 @@ function isEnglishLocale(ctx: any): boolean {
 }
 
 export function apply(ctx: any, config: Config) {
-  // Publish the port this instance actually bound, BEFORE anything else that
-  // could fail. A successor that came up on a different port than the helper
-  // expects has no other way to tell the helper where it landed: its argv does
-  // not carry the resolved port and its stdout line is a human-readable log, not
-  // a contract. Best-effort: a read-only home must not stop the plugin.
-  writePortHandshake(CURRENT_PORT)
   // Startup housekeeping: prune stale restart-helper logs from previous runs.
   pruneOldRestartLogs()
   // Resolve THIS instance's port first: markers are keyed by port so

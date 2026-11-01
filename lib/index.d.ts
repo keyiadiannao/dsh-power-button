@@ -47,6 +47,30 @@ declare const Config: z<Config>;
 /** Per-port marker path. Exported for tests (isolated via DSH_HOME). */
 declare function markerPath(): string;
 /**
+ * Whether this Host can hand its restart to the Desktop shell.
+ *
+ * Both halves are required: the shell must advertise the protocol, and the IPC channel
+ * the request travels over must be connected. A Host that satisfies only one of them
+ * falls back to the detached-helper restart instead of exiting into nothing.
+ */
+/**
+ * The protocol generation a shell advertised, or undefined when it advertised none.
+ *
+ * A malformed value is not a weaker advertisement: Number() turns it into NaN, which
+ * compares false against every bound, so it is rejected explicitly instead.
+ * @param advertised - raw value of the protocol variable, or undefined.
+ * @returns the generation when it is a positive integer.
+ */
+declare function advertisedDesktopRestartProtocol(advertised: string | undefined): number | undefined;
+/**
+ * Whether this Host can hand its restart to the Desktop shell.
+ *
+ * Both halves are required: the shell must advertise the protocol, and the IPC channel
+ * the request travels over must be connected. A host that satisfies only one of them
+ * falls back to the detached-helper restart instead of exiting into nothing.
+ */
+declare function desktopShellRestartAvailable(): boolean;
+/**
  * Who asked for a restart.
  *
  * `sessionId` is only ever recorded from a caller that actually has a causal
@@ -312,15 +336,6 @@ interface RestartHelperPayload {
   commitFile: string;
   logFile: string;
   serverLog: string;
-  /**
-   * Directory holding the per-port handshake files the successor writes.
-   *
-   * The helper cannot derive the successor's port from the payload, so it
-   * watches this directory for the file that process publishes from the port it
-   * actually bound. Defaulted to the marker's directory for callers that omit
-   * it, so an existing payload shape keeps working.
-   */
-  handshakeDir?: string;
   sessionsRoot: string;
   commitWaitMs: number;
   readyWaitMs: number;
@@ -528,4 +543,4 @@ declare function connectionRejection(ctx: any, req: {
 }): 401 | 403 | undefined | null;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, advertisedDesktopRestartProtocol, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, desktopShellRestartAvailable, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 const testHome = process.env.DSH_HOME as string
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { consumeRestartConfirmation, writeMarker } from '../src/index.ts'
+import { advertisedDesktopRestartProtocol, consumeRestartConfirmation, desktopShellRestartAvailable, writeMarker } from '../src/index.ts'
 
 /**
  * The Desktop host launches the web app with a hardcoded `--port 0`, so a
@@ -107,5 +107,77 @@ describe('restart marker claimed across port keys', () => {
 
     expect(claimed?.restartId).toBe('same-port-restart')
     expect(existsSync(file)).toBe(false)
+  })
+})
+
+describe('desktop shell restart capability', () => {
+  // The plugin hands its restart to the Electron shell only when the shell says it
+  // accepts one AND the IPC channel the request travels over is connected. Guessing
+  // from argv or a profile name would exit a Host that nothing is waiting to relaunch.
+  afterEach(() => {
+    delete process.env.DSH_DESKTOP_RESTART_PROTOCOL
+  })
+
+  it('is unavailable without the advertised protocol', () => {
+    expect(desktopShellRestartAvailable()).toBe(false)
+  })
+
+  it('rejects a malformed advertisement instead of reading it as support', () => {
+    // Number('yes') is NaN, and NaN compares false against every bound, so a loose
+    // guard would let it through. The generation is validated instead.
+    expect(advertisedDesktopRestartProtocol(undefined)).toBeUndefined()
+    expect(advertisedDesktopRestartProtocol('')).toBeUndefined()
+    expect(advertisedDesktopRestartProtocol('yes')).toBeUndefined()
+    expect(advertisedDesktopRestartProtocol('0')).toBeUndefined()
+    expect(advertisedDesktopRestartProtocol('-1')).toBeUndefined()
+    expect(advertisedDesktopRestartProtocol('1.5')).toBeUndefined()
+    expect(advertisedDesktopRestartProtocol('1')).toBe(1)
+    expect(advertisedDesktopRestartProtocol('3')).toBe(3)
+  })
+})
+
+describe('restart marker claimed by the desktop launch identity', () => {
+  // The shell respawns the whole application, so the successor can come up on a
+  // different port than the marker was written under. It carries its identity in
+  // DSH_DESKTOP_RESTART_ID instead of the helper's token.
+  const markerFor = (port: number): string => join(testHome, `dsh-power-marker-${port}.json`)
+
+  beforeEach(() => {
+    for (const name of readdirSync(testHome)) {
+      if (/^dsh-power-marker-.*\.json$/u.test(name)) rmSync(join(testHome, name), { force: true })
+    }
+  })
+
+  afterEach(() => {
+    delete process.env.DSH_DESKTOP_RESTART_ID
+  })
+
+  it('claims it across ports and consumes it', () => {
+    const file = markerFor(55442)
+    writeFileSync(file, JSON.stringify({
+      schemaVersion: 2,
+      restartId: 'shell-restart',
+      fromInstanceId: 'old-instance',
+      requestedAt: new Date().toISOString(),
+    }), 'utf8')
+
+    process.env.DSH_DESKTOP_RESTART_ID = 'shell-restart'
+    const claimed = consumeRestartConfirmation()
+
+    expect(claimed?.restartId).toBe('shell-restart')
+    expect(claimed?.fromInstanceId).toBe('old-instance')
+    expect(existsSync(file)).toBe(false)
+  })
+
+  it('does not claim a marker for another restart', () => {
+    writeFileSync(markerFor(55443), JSON.stringify({
+      schemaVersion: 2,
+      restartId: 'other-restart',
+      fromInstanceId: 'old-instance',
+      requestedAt: new Date().toISOString(),
+    }), 'utf8')
+
+    process.env.DSH_DESKTOP_RESTART_ID = 'my-restart'
+    expect(consumeRestartConfirmation()).toBeNull()
   })
 })
