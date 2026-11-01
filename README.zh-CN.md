@@ -96,7 +96,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 
 ## 桌面版
 
-桌面应用中 Host 是 Electron 外壳的子进程。退出这个子进程会触发崩溃恢复，重放它的命令行则会生成没有窗口、也没有原 IPC 通道的 Host。因此本插件会拒绝 Electron Node 模式 Host 中的重启和关机：HTTP 调用返回 `503` 与 `reason: "desktop-unsupported"`，命令与模型工具返回错误，不启动 helper，也不安排退出。请通过应用菜单或托盘退出，再重新打开；关闭主窗口可能只会将应用隐藏到托盘。
+桌面应用中 Host 是 Electron 外壳的子进程。退出这个子进程会触发崩溃恢复，重放它的命令行则会生成没有窗口、也没有原 IPC 通道的 Host。因此本插件会拒绝 Electron Node 模式 Host 中的重启和关机：HTTP 调用返回 `503` 与 `reason: "desktop-unsupported"`，命令与模型工具返回错误，不启动 helper，也不安排退出。请通过应用菜单或托盘退出，再重新打开；关闭主窗口可能只会将应用隐藏到托盘。要让插件能驱动重启，宿主需要改什么，写在 [`docs/desktop-restart-protocol.md`](docs/desktop-restart-protocol.md)。
 
 ## 安全
 

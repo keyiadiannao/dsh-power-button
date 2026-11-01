@@ -96,7 +96,7 @@ Shutdown posts `/api/dsh-power-button/shutdown` and stops without relaunching. I
 
 ## Desktop
 
-The Desktop application runs the Host as a child of its Electron shell. Exiting that child invokes crash recovery; replaying its command line creates a Host without a window or its original IPC channel. This plugin therefore refuses restart and shutdown in Electron's Node-mode Host: HTTP calls return `503` with `reason: "desktop-unsupported"`, and commands and the model tool report an error. No helper or exit is scheduled. Use the application's Quit menu or tray action, then reopen it; closing the main window can leave the application running in the tray.
+The Desktop application runs the Host as a child of its Electron shell. Exiting that child invokes crash recovery; replaying its command line creates a Host without a window or its original IPC channel. This plugin therefore refuses restart and shutdown in Electron's Node-mode Host: HTTP calls return `503` with `reason: "desktop-unsupported"`, and commands and the model tool report an error. No helper or exit is scheduled. Use the application's Quit menu or tray action, then reopen it; closing the main window can leave the application running in the tray. What a host would have to change for a plugin-driven restart to work is written up in [`docs/desktop-restart-protocol.md`](docs/desktop-restart-protocol.md).
 
 ## Safety
 
