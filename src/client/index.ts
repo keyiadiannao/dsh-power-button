@@ -11,7 +11,7 @@
  */
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
-import { SHUTDOWN_CONFIRM_REQUEST, SHUTDOWN_CONFIRM_REQUEST_LEGACY } from '../protocol.ts'
+import { RESTART_FLOW_WAIT_MS, SHUTDOWN_CONFIRM_REQUEST, SHUTDOWN_CONFIRM_REQUEST_LEGACY } from '../protocol.ts'
 import { RestartButton } from './RestartButton.tsx'
 import { RestartNotice } from './RestartNotice.tsx'
 import { RestartOverlay } from './RestartOverlay.tsx'
@@ -118,6 +118,7 @@ export function getRestartError(): string | null { return errorMsg }
 /** Surface an error, unless the flow has already moved past the point of no return. */
 function fail(msg: string): void {
   if (phase === 'error' || phase === 'recovering') return
+  operationId += 1
   phase = 'error'
   errorMsg = msg
   emit()
@@ -228,6 +229,7 @@ export function beginPower(next: PowerAction): void {
         const r = await fetch('/api/dsh-power-button/health', { cache: 'no-store' })
         up = r.ok
       } catch { up = false }
+      if (!active()) { clearInterval(timer); return }
       if (!up) {
         // Require a short streak of DOWNs (a single transient blip must not
         // declare "已关机").
@@ -290,7 +292,7 @@ export function beginPower(next: PowerAction): void {
     let upTicks = 0
     let attempts = 0
     const POLL_MS = 1000
-    const MAX_ATTEMPTS = 90
+    const MAX_ATTEMPTS = Math.ceil(RESTART_FLOW_WAIT_MS / POLL_MS)
 
     const poll = async (): Promise<void> => {
       if (!active()) return

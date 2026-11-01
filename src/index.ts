@@ -59,7 +59,7 @@ import os from 'node:os'
 import path from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import { createUserMessage, type ContextFormed } from '@deepseek-ai/dsh-llm'
-import { SHUTDOWN_CONFIRM_REQUEST } from './protocol.ts'
+import { RESTART_READY_WAIT_MS, SHUTDOWN_CONFIRM_REQUEST } from './protocol.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -742,7 +742,7 @@ const HELPER_COMMIT_WAIT_MS = 30_000
  * The helper polls, so a fast boot costs nothing extra here; the only price of a
  * longer window is that a genuinely dead successor is reported later.
  */
-const HELPER_READY_WAIT_MS = 180_000
+const HELPER_READY_WAIT_MS = RESTART_READY_WAIT_MS
 /** Schema version of the handshake status records (not the marker's). */
 const RESTART_SCHEMA_VERSION = 2
 
@@ -1559,8 +1559,11 @@ function sessionsQuiescent(maxWaitMs) {
  * `ok: false` and leaves this process running: the caller must be able to
  * report a failed restart instead of ending up with no process at all.
  */
-async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string }> {
+async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string, reason?: 'desktop-unsupported' }> {
   const restartId = randomUUID()
+  if (isDesktopHostProcess()) {
+    return { ok: false, action: 'restart', restartId, reason: 'desktop-unsupported', error: desktopPowerError(isEnglishLocale(ctx)) }
+  }
   let helper: ChildProcess | undefined
   try {
     const port = resolvePort(ctx)
@@ -1686,6 +1689,9 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
  * again manually.
  */
 export function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefined) {
+  if (isDesktopHostProcess()) {
+    return { ok: false, action: 'shutdown', reason: 'desktop-unsupported', error: desktopPowerError(isEnglishLocale(ctx)) }
+  }
   try {
     const exitNow = (): void => {
       requestAppExit(ctx)
@@ -2059,6 +2065,18 @@ function releasePowerTransition(): void {
   powerTransition = null
 }
 
+/** Electron's Node-mode Host is owned by the Desktop shell, including after IPC disconnects. */
+function isDesktopHostProcess(): boolean {
+  return process.env.ELECTRON_RUN_AS_NODE === '1' && typeof process.versions.electron === 'string'
+}
+
+/** The shell must perform Desktop quit and restart through its own lifecycle. */
+function desktopPowerError(english: boolean): string {
+  return english
+    ? 'Desktop power control is unavailable. Quit and reopen the application from its menu or tray icon.'
+    : '桌面版暂不支持此电源操作，请通过应用菜单或托盘退出后重新打开'
+}
+
 /** Whether the UI language is English (DSH settings `locale.preference`). */
 function isEnglishLocale(ctx: any): boolean {
   try {
@@ -2164,7 +2182,7 @@ export function apply(ctx: any, config: Config) {
           // A plain POST carries no causal session, and one is never guessed.
           const result = await restartDsh(ctx, undefined, { kind: 'http' })
           if (!result.ok) releasePowerTransition()
-          return json(res, result.ok ? 200 : 500, result)
+          return json(res, result.ok ? 200 : result.reason === 'desktop-unsupported' ? 503 : 500, result)
         }
         if (sub === '/shutdown' && req.method === 'POST') {
           if (!claimPowerTransition('shutdown')) {
@@ -2172,7 +2190,7 @@ export function apply(ctx: any, config: Config) {
           }
           const result = shutdownDsh(ctx, res)
           if (!result.ok) releasePowerTransition()
-          return json(res, result.ok ? 200 : 500, result)
+          return json(res, result.ok ? 200 : result.reason === 'desktop-unsupported' ? 503 : 500, result)
         }
         if (sub === '/health' && req.method === 'GET') {
           const body: Record<string, unknown> = {
@@ -2369,6 +2387,7 @@ export function apply(ctx: any, config: Config) {
       input: { hint: en ? 'opens the shutdown confirm dialog' : '打开关机确认对话框' },
       recordInput: false,
       async handler() {
+        if (isDesktopHostProcess()) return { kind: 'error', text: desktopPowerError(en) }
         // Signal the client to show the GUI confirm dialog (same one the power
         // button uses) via the shared SHUTDOWN_CONFIRM_REQUEST protocol value.
         // The handler does NOT shut down here: shutdown is irreversible, so

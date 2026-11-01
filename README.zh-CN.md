@@ -66,7 +66,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 
 ## 工作原理
 
-重启是一次显式的 ARM → COMMIT → ACK 握手。旧进程在有一个存活的继任者接手拉起职责之前不得退出——没有任何进程负责拉起是 UI 唯一无法挽回的结果，因此 ACK 之前的任何失败都会让旧进程继续运行。
+重启是显式 ARM → COMMIT → ACK 握手：只有活着的 helper 确认接手拉起职责，旧进程才会退出；ACK 之前的任何失败都会保留旧进程。拉起新实例后，helper 最多等待 180 秒确认就绪。浏览器为包含退出与准备阶段的完整重启提供五分钟的轮询预算。请求被拒绝后，即使后续健康探测失败，界面也会保留错误状态。
 
 ```
 点击电源 → 重启
@@ -96,7 +96,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 
 ## 桌面版
 
-桌面应用中 Host 是 Electron 外壳的子进程，重启由外壳负责：任何 Host 退出都会被当作崩溃，由外壳自己的恢复流程处理。分离的 helper 替代不了它——那会留下一个没有窗口、没有 IPC 的第二个 Host，而应用本身又会被外壳重新拉起。因此重启只在 `dsh web` 下受支持，桌面版不受支持：在桌面版里请退出并重新打开应用。
+桌面应用中 Host 是 Electron 外壳的子进程。退出这个子进程会触发崩溃恢复，重放它的命令行则会生成没有窗口、也没有原 IPC 通道的 Host。因此本插件会拒绝 Electron Node 模式 Host 中的重启和关机：HTTP 调用返回 `503` 与 `reason: "desktop-unsupported"`，命令与模型工具返回错误，不启动 helper，也不安排退出。请通过应用菜单或托盘退出，再重新打开；关闭主窗口可能只会将应用隐藏到托盘。
 
 ## 安全
 

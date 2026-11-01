@@ -395,12 +395,20 @@ declare function buildRestartHelper(p: RestartHelperPayload): string;
 declare function shutdownDsh(ctx: any, res: import('node:http').ServerResponse | undefined): {
   ok: boolean;
   action: string;
+  reason: string;
+  error: string;
+  note?: never;
+} | {
+  ok: boolean;
+  action: string;
   note: string;
+  reason?: never;
   error?: never;
 } | {
   ok: boolean;
   action: string;
   error: string;
+  reason?: never;
   note?: never;
 };
 /** Which rule refused a destructive request. Stable codes: they are reported

@@ -66,7 +66,7 @@ Configured through the profile's cordis layer (`cordis.patch.yml` or the setting
 
 ## How it works
 
-Restart is an explicit ARM → COMMIT → ACK handshake. The old process does not exit until a live successor owns the relaunch, because an exit with nobody left to relaunch is the one outcome the UI cannot recover from — every failure before the ACK keeps the old process running.
+Restart is an explicit ARM → COMMIT → ACK handshake. The old process does not exit until a live helper owns the relaunch; every failure before the ACK keeps the old process running. After spawning the successor, the helper waits up to 180 seconds for readiness. The browser allows a five-minute polling budget for the full restart, including shutdown and preparation. A refused request remains an error even if later health probes fail.
 
 ```
 click power → Restart
@@ -96,7 +96,7 @@ Shutdown posts `/api/dsh-power-button/shutdown` and stops without relaunching. I
 
 ## Desktop
 
-The Desktop application runs the Host as a child of its Electron shell, and that shell owns the relaunch: any Host exit is treated as a crash and answered with its own recovery. A detached helper cannot replace it — it would leave a second Host with no window and no IPC while the shell relaunches the application itself. Restart is therefore supported on `dsh web`, and on the Desktop surface it is not: quit and reopen the application there instead.
+The Desktop application runs the Host as a child of its Electron shell. Exiting that child invokes crash recovery; replaying its command line creates a Host without a window or its original IPC channel. This plugin therefore refuses restart and shutdown in Electron's Node-mode Host: HTTP calls return `503` with `reason: "desktop-unsupported"`, and commands and the model tool report an error. No helper or exit is scheduled. Use the application's Quit menu or tray action, then reopen it; closing the main window can leave the application running in the tray.
 
 ## Safety
 

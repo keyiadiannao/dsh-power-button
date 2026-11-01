@@ -19,3 +19,13 @@ export const SHUTDOWN_CONFIRM_REQUEST = 'dsh-power-button:shutdown-confirm:v1'
 /** Sentinel emitted by hosts at ≤0.2.3; still accepted by the client so a
  * page loaded before a host upgrade keeps popping the dialog. */
 export const SHUTDOWN_CONFIRM_REQUEST_LEGACY = 'SHUTDOWN_CONFIRM_PENDING'
+
+/** Maximum readiness wait after the helper spawns the successor. */
+export const RESTART_READY_WAIT_MS = 180_000
+
+/**
+ * Browser wait for the complete restart, including the helper's readiness wait.
+ * The additional two minutes cover handoff, bounded Host shutdown, port release,
+ * session-log quiescence, registry reads, and spawn retries.
+ */
+export const RESTART_FLOW_WAIT_MS = RESTART_READY_WAIT_MS + 120_000
