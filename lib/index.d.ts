@@ -312,6 +312,15 @@ interface RestartHelperPayload {
   commitFile: string;
   logFile: string;
   serverLog: string;
+  /**
+   * Directory holding the per-port handshake files the successor writes.
+   *
+   * The helper cannot derive the successor's port from the payload, so it
+   * watches this directory for the file that process publishes from the port it
+   * actually bound. Defaulted to the marker's directory for callers that omit
+   * it, so an existing payload shape keeps working.
+   */
+  handshakeDir?: string;
   sessionsRoot: string;
   commitWaitMs: number;
   readyWaitMs: number;
