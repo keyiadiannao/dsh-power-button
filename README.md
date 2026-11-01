@@ -94,6 +94,10 @@ Four invariants hold this together:
 
 Shutdown posts `/api/dsh-power-button/shutdown` and stops without relaunching. It is irreversible, so the button and `/shutdown` both open a confirm dialog; the model is never given shutdown.
 
+## Desktop
+
+The Desktop application runs the Host as a child of its Electron shell, and that shell owns the relaunch: any Host exit is treated as a crash and answered with its own recovery. A detached helper cannot replace it — it would leave a second Host with no window and no IPC while the shell relaunches the application itself. Restart is therefore supported on `dsh web`, and on the Desktop surface it is not: quit and reopen the application there instead.
+
 ## Safety
 
 - Destructive POSTs go through **the deployment's own browser-trust fence and authentication** via `ctx.connection.requestRejection` — the call the host's `/api` route uses. `/api/dsh-power-button/*` is longer than the official `/api` prefix, so longest-prefix matching never routes these requests through that fence; delegating keeps them under the operator's real policy, including LAN authorities derived from an all-interface bind and any `trustedHosts` / `--trusted-host` declaration.

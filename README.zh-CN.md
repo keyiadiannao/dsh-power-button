@@ -94,6 +94,10 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 
 关机 POST `/api/dsh-power-button/shutdown`，终止且不拉起。由于不可逆，电源按钮和 `/shutdown` 都会先弹确认对话框；模型不暴露关机。
 
+## 桌面版
+
+桌面应用中 Host 是 Electron 外壳的子进程，重启由外壳负责：任何 Host 退出都会被当作崩溃，由外壳自己的恢复流程处理。分离的 helper 替代不了它——那会留下一个没有窗口、没有 IPC 的第二个 Host，而应用本身又会被外壳重新拉起。因此重启只在 `dsh web` 下受支持，桌面版不受支持：在桌面版里请退出并重新打开应用。
+
 ## 安全
 
 - 破坏性 POST 由**本部署自己的浏览器信任栅栏与认证**保护：通过 `ctx.connection.requestRejection` 取自宿主，与宿主 `/api` 路由用的是同一个调用。`/api/dsh-power-button/*` 比官方 `/api` 前缀更长，最长前缀匹配**不会**把这些请求交给那道栅栏；委托给它，才能让端点始终处于运维者真实策略之下——包括 Web 运行时从"绑定所有网卡"推导出的 LAN 权威，以及任何 `trustedHosts` / `--trusted-host` 声明
