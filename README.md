@@ -12,7 +12,7 @@ A self-contained **power & lifecycle controller** for [DeepSeek Harness](https:/
 ## Features
 
 - **Sidebar power button** in the footer action slot, theme-aware and styled to match the adjacent Settings trigger.
-- **Restart / Shutdown menu** with a Windows-style full-screen overlay; the page reloads by itself after a confirmed restart.
+- **Capability-aware power menu**: refresh the interface without restarting the backend, see plugin and Host status, or use available Restart / Shutdown actions. A Windows-style overlay tracks power operations and reloads the page after a confirmed restart.
 - **Self-contained restart engine**: a detached `.cjs` helper takes over relaunching DSH through an ARM → COMMIT → ACK handshake, waits for the old process, the port and the session logs, then relaunches the same invocation in the same cwd. A `--port 0` command line is pinned to the port the old process actually bound. No PowerShell, no `taskkill`.
 - **`/restart` and `/shutdown` commands**, a **`restart_harness` model tool** (registration is skipped when another plugin already owns the name), and a read-only **`restart_status`** tool for checking whether a restart happened.
 - **Localized UI and host notices** (zh / en), following the profile's `locale.preference`.
@@ -24,7 +24,7 @@ A self-contained **power & lifecycle controller** for [DeepSeek Harness](https:/
 
 ![Power button in the sidebar footer](docs/screenshots/en/power-button.png)
 
-**② Restart / Shutdown menu** — two actions, one click away.
+**② Power menu** — the current menu also includes interface refresh and status details.
 
 ![Restart / Shutdown menu](docs/screenshots/en/power-menu.png)
 
@@ -66,7 +66,7 @@ Configured through the profile's cordis layer (`cordis.patch.yml` or the setting
 
 ## How it works
 
-Restart is an explicit ARM → COMMIT → ACK handshake. The old process does not exit until a live helper owns the relaunch; every failure before the ACK keeps the old process running. After spawning the successor, the helper waits up to 180 seconds for readiness. The browser allows a five-minute polling budget for the full restart, including shutdown and preparation. A refused request remains an error even if later health probes fail.
+Restart is an explicit ARM → COMMIT → ACK handshake. The old process does not exit until a live helper owns the relaunch; every failure before the ACK keeps the old process running. After spawning the successor, the helper waits up to 180 seconds for readiness. The browser allows five minutes for the whole restart, including shutdown and preparation, and bounds each health request and its body to five seconds. A refused request remains an error even if later health probes fail. A timeout or missing acknowledgement leaves the outcome unconfirmed; check DSH before retrying.
 
 ```
 click power → Restart
@@ -92,11 +92,13 @@ Four invariants hold this together:
 - Exit is bounded end to end, and the bounds are **derived rather than duplicated**: graceful exit gets a 15 s watchdog, the pre-exit flush cap is 5 s, and the helper's patience for the old PID is computed from both, so they cannot drift into the helper giving up first.
 - The successor's environment is **re-read from the registry**, not inherited: a process environment is a snapshot from its launcher, so a variable changed with `setx` or System Properties would otherwise never reach the relaunched instance. The block is composed in the order Windows uses — the inherited block as the base layer, machine values over it, then user values shadowing those — and a `REG_EXPAND_SZ` value is resolved against the block as it stands at its own stage, so a machine value cannot see a user-only name. That isolation is between registry layers, not a byte-exact replay of how Windows builds the block: names the launcher already carried stay visible at every stage, which is deliberate because some of them — `SystemRoot` on a real machine — exist only in the process environment. `PATH` keeps both halves (machine first) and each part is expanded according to its own type before duplicates are dropped. It is read through `reg export` (UTF-16LE), so non-ASCII values survive on any console code page; the export is a transient file under the harness home that is deleted in the same call, and it inherits that directory's ACL exactly as `.credentials.yaml` does — the file mode is not a privacy guarantee on Windows. A variable **deleted** from the registry still cannot be seen, and a directory deleted from a registry `PATH` survives while the launcher's block still carries it — it cannot be told apart from one a package manager injected at launch, and dropping those would break children that resolve tools by name. Non-Windows platforms keep plain inheritance.
 
-Shutdown posts `/api/dsh-power-button/shutdown` and stops without relaunching. It is irreversible, so the button and `/shutdown` both open a confirm dialog; the model is never given shutdown.
+Shutdown posts `/api/dsh-power-button/shutdown` and stops without relaunching. It is irreversible, so the button and `/shutdown` both open a confirm dialog; the model is never given shutdown. After an acknowledgement and repeated connection failures, the interface reports that the connection closed, not that it independently verified the process exited.
 
 ## Desktop
 
-The Desktop application runs the Host as a child of its Electron shell. Exiting that child invokes crash recovery; replaying its command line creates a Host without a window or its original IPC channel. This plugin therefore refuses restart and shutdown in Electron's Node-mode Host: HTTP calls return `503` with `reason: "desktop-unsupported"`, and commands and the model tool report an error. No helper or exit is scheduled. Use the application's Quit menu or tray action, then reopen it; closing the main window can leave the application running in the tray.
+The Desktop application runs the Host as a child of its Electron shell. Exiting that child invokes crash recovery; replaying its command line creates a Host without a window or its original IPC channel. This plugin therefore disables restart and shutdown in the Desktop menu and refuses them in Electron's Node-mode Host: HTTP calls return `503` with `reason: "desktop-unsupported"`, and commands and the model tool report an error. No helper or exit is scheduled. Use the application's Quit menu or tray action, then reopen it; closing the main window can leave the application running in the tray. **Refresh interface** only reloads the window and does not reload plugins or restart the Host.
+
+The menu reads its capabilities and a limited status summary from `/api/dsh-power-button/status`; it never exposes session IDs or detailed failure records there. If status cannot be read, power actions stay disabled while interface refresh remains available. The last-restart summary is based on the current port's saved record: no available record does not mean a restart never happened.
 
 ## Safety
 

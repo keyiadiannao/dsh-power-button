@@ -15,14 +15,40 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { beginPower, getRestartPhase, onRestartChange, NS } from './index.ts'
 import { ShutdownConfirm } from './ShutdownConfirm.tsx'
 import { motion, radius, shadow } from './theme.ts'
+import { objectValue, requestJson } from './request.ts'
 
 export type RestartButtonProps = { wide: boolean } & PropsLocale<typeof NS>
 
-const MENU_W = 212
+const MENU_W = 280
+
+type MenuStatus = {
+  pluginVersion: string
+  lifecycle: 'ready' | 'restart' | 'shutdown'
+  surface: 'desktop' | 'web'
+  capabilities: { restart: boolean, shutdown: boolean }
+  lastRestart: 'unavailable' | 'completed' | 'failed' | 'in-progress' | 'unknown'
+}
+
+function parseStatus(value: unknown): MenuStatus | null {
+  const body = objectValue(value)
+  const caps = objectValue(body?.capabilities)
+  if (body?.ok !== true || typeof body.pluginVersion !== 'string'
+    || (body.lifecycle !== 'ready' && body.lifecycle !== 'restart' && body.lifecycle !== 'shutdown')
+    || (body.surface !== 'desktop' && body.surface !== 'web')
+    || typeof caps?.restart !== 'boolean' || typeof caps.shutdown !== 'boolean'
+    || (body.lastRestart !== 'unavailable' && body.lastRestart !== 'completed'
+      && body.lastRestart !== 'failed' && body.lastRestart !== 'in-progress' && body.lastRestart !== 'unknown')) return null
+  return {
+    pluginVersion: body.pluginVersion, lifecycle: body.lifecycle, surface: body.surface,
+    capabilities: { restart: caps.restart, shutdown: caps.shutdown }, lastRestart: body.lastRestart,
+  }
+}
 
 export function RestartButton(props: RestartButtonProps): JSX.Element {
   const { t } = props
   const [open, setOpen] = useState(false)
+  const [status, setStatus] = useState<MenuStatus | 'loading' | 'unavailable'>('loading')
+  const [, updatePosition] = useState(0)
   // Shutdown is irreversible (the process exits and must be started manually),
   // so it always passes through a confirm dialog before beginPower('shutdown').
   const [confirming, setConfirming] = useState(false)
@@ -34,11 +60,21 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
   const phase = useSyncExternalStore(onRestartChange, getRestartPhase)
   const busy = phase !== 'idle' && phase !== 'error'
 
+  useEffect(() => {
+    if (!open) return
+    const controller = new AbortController()
+    void requestJson('/api/dsh-power-button/status', { cache: 'no-store', signal: controller.signal }).then((result) => {
+      if (controller.signal.aborted) return
+      setStatus(result.kind === 'response' && result.ok ? parseStatus(result.body) ?? 'unavailable' : 'unavailable')
+    })
+    return () => controller.abort()
+  }, [open])
+
   // Close on outside click or Escape; move focus into the menu on open and
   // back to the trigger on close (WAI-ARIA menu-button pattern).
   useEffect(() => {
     if (!open) return
-    const firstItem = menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')
+    const firstItem = menuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')
     firstItem?.focus()
     const onDown = (e: MouseEvent): void => {
       const t = e.target as Node
@@ -54,7 +90,7 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
       }
       if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
       e.preventDefault()
-      const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? [])]
+      const items = [...(menuRef.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not(:disabled)') ?? [])]
       const idx = items.indexOf(document.activeElement as HTMLButtonElement)
       const delta = e.key === 'ArrowDown' ? 1 : -1
       if (items.length === 0) return
@@ -63,9 +99,14 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
+    const reposition = (): void => updatePosition((value) => value + 1)
+    window.addEventListener('resize', reposition)
+    window.addEventListener('scroll', reposition, true)
     return () => {
       document.removeEventListener('mousedown', onDown)
       document.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', reposition)
+      window.removeEventListener('scroll', reposition, true)
     }
   }, [open])
 
@@ -79,21 +120,17 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
     beginPower('restart')
   }
 
-  // Anchor the menu above the button, right-aligned to its right edge.
-  // No hardcoded menu height: measure the rendered menu via menuRef and offset
-  // by its ACTUAL height, so it never overlaps the button regardless of item
-  // count, wrapping, or font scaling. Width is responsive: at least 16px gutter
-  // on narrow viewports, capped at the menu's comfortable width.
   const anchor = (): React.CSSProperties => {
     const r = btnRef.current?.getBoundingClientRect()
     if (!r) return { display: 'none' }
-    const m = menuRef.current?.getBoundingClientRect()
     const menuW = Math.min(MENU_W, Math.max(0, window.innerWidth - 16))
-    const menuH = m?.height ?? 84
+    const above = r.top >= window.innerHeight / 2
     return {
       position: 'fixed',
-      left: Math.max(8, r.right - menuW),
-      top: Math.max(8, r.top - 8 - menuH),
+      left: Math.max(8, Math.min(window.innerWidth - menuW - 8, r.right - menuW)),
+      ...(above ? { bottom: window.innerHeight - r.top + 8 } : { top: r.bottom + 8 }),
+      maxHeight: Math.max(0, above ? r.top - 16 : window.innerHeight - r.bottom - 16),
+      overflowY: 'auto',
       width: menuW,
     }
   }
@@ -105,7 +142,12 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
         ref={btnRef}
         type="button"
         className="dsh-power-button"
-        onClick={() => { if (!busy) setOpen(o => !o) }}
+        onClick={() => {
+          if (!busy) {
+            if (!open) setStatus('loading')
+            setOpen(!open)
+          }
+        }}
         aria-haspopup="menu"
         aria-expanded={open}
         disabled={busy}
@@ -177,8 +219,14 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
           }}
         >
           <MenuItem
+            label={t('refresh')}
+            title={t('refreshHint')}
+            onClick={() => window.location.reload()}
+          />
+          <MenuItem
             label={t('restart')}
             title={t('restartHint')}
+            disabled={typeof status !== 'object' || status.lifecycle !== 'ready' || !status.capabilities.restart}
             onClick={() => pick('restart')}
             glyph={
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flex: '0 0 auto' }}>
@@ -192,6 +240,7 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
             title={t('shutdownHint')}
             hint={t('shutdownStops')}
             danger
+            disabled={typeof status !== 'object' || status.lifecycle !== 'ready' || !status.capabilities.shutdown}
             onClick={() => pick('shutdown')}
             glyph={
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true" style={{ flex: '0 0 auto' }}>
@@ -200,6 +249,20 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
               </svg>
             }
           />
+          <div role="none" style={{ borderTop: '1px solid var(--dsw-alias-border-l3, rgba(196,211,232,0.31))', margin: '6px 4px 2px', padding: '8px 6px 4px', fontSize: 12, lineHeight: 1.5, color: 'var(--dsw-alias-label-secondary, rgba(242,246,252,0.65))', overflowWrap: 'anywhere' }}>
+            <div role="status" aria-live="polite">
+              {status === 'loading' ? t('statusLoading') : status === 'unavailable' ? t('statusUnavailable') : (
+                <>
+                  <div>{t('statusVersion')}: {status.pluginVersion}</div>
+                  <div>{t('statusHost')}: {t(({ ready: 'hostReady', restart: 'hostRestart', shutdown: 'hostShutdown' } as const)[status.lifecycle])}</div>
+                  <div>{t('statusLastRestart')}: {t(({ unavailable: 'lastUnavailable', completed: 'lastCompleted', failed: 'lastFailed', 'in-progress': 'lastInProgress', unknown: 'lastUnknown' } as const)[status.lastRestart])}</div>
+                  {status.surface === 'desktop' && <div style={{ marginTop: 6 }}>{t('desktopInstructions')}</div>}
+                  {status.surface !== 'desktop' && (!status.capabilities.restart || !status.capabilities.shutdown)
+                    && <div style={{ marginTop: 6 }}>{t('capabilitiesUnavailable')}</div>}
+                </>
+              )}
+            </div>
+          </div>
         </div>
       ) : null}
 
@@ -221,15 +284,16 @@ export function RestartButton(props: RestartButtonProps): JSX.Element {
   )
 }
 
-function MenuItem({ label, title, hint, danger, onClick, glyph }: {
+function MenuItem({ label, title, hint, danger, disabled, onClick, glyph }: {
   label: string
   title?: string
   /** Small secondary semantics (e.g. "Stops Harness"), 11px at reduced opacity. */
   hint?: string
   /** Shutdown item: error tint appears on hover only — calm by default. */
   danger?: boolean
+  disabled?: boolean
   onClick: () => void
-  glyph: JSX.Element
+  glyph?: JSX.Element
 }): JSX.Element {
   const dangerHover = danger
     ? 'color-mix(in srgb, var(--dsw-alias-state-error-primary, #ff8592) 10%, var(--dsw-alias-bg-layer-2, rgba(24,28,38,0.97)))'
@@ -240,6 +304,7 @@ function MenuItem({ label, title, hint, danger, onClick, glyph }: {
       role="menuitem"
       title={title}
       onClick={onClick}
+      disabled={disabled}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -255,16 +320,17 @@ function MenuItem({ label, title, hint, danger, onClick, glyph }: {
         font: 'inherit',
         fontSize: 14,
         lineHeight: '22px',
-        cursor: 'pointer',
+        cursor: disabled ? 'default' : 'pointer',
+        opacity: disabled ? 0.55 : 1,
         textAlign: 'left',
-        whiteSpace: 'nowrap',
+        whiteSpace: 'normal',
         transition: `background ${motion.fast} ${motion.ease}`,
       }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = dangerHover }}
+      onMouseEnter={(e) => { if (!disabled) (e.currentTarget as HTMLButtonElement).style.background = dangerHover }}
       onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = 'transparent' }}
     >
-      {glyph}
-      <span style={{ display: 'flex', alignItems: 'baseline', gap: 8, lineHeight: '22px', whiteSpace: 'nowrap', flex: '1 1 auto', minWidth: 0 }}>
+      {glyph ?? <span aria-hidden="true" style={{ flex: '0 0 15px' }} />}
+      <span style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', columnGap: 8, lineHeight: '22px', flex: '1 1 auto', minWidth: 0 }}>
         <span style={{ display: 'block', flex: 'none' }}>{label}</span>
         {hint !== undefined && (
           <span style={{ display: 'block', flex: 'none', fontSize: 11, opacity: 0.55, color: 'var(--dsw-alias-label-secondary, rgba(242,246,252,0.65))' }}>

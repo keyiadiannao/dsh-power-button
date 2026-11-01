@@ -10,6 +10,7 @@
  *   POST /api/dsh-power-button/restart   — relaunch DSH (detached helper)
  *   POST /api/dsh-power-button/shutdown  — stop DSH (graceful exit, no relaunch)
  *   GET  /api/dsh-power-button/health    — liveness probe for the client flow
+ *   GET  /api/dsh-power-button/status    — public capability and lifecycle summary
  *
  * Model tool:
  *   restart_harness — registers the SAME tool name as anweat/dsh-restart so
@@ -2191,6 +2192,23 @@ export function apply(ctx: any, config: Config) {
           const result = shutdownDsh(ctx, res)
           if (!result.ok) releasePowerTransition()
           return json(res, result.ok ? 200 : result.reason === 'desktop-unsupported' ? 503 : 500, result)
+        }
+        if (sub === '/status' && req.method === 'GET') {
+          const desktop = isDesktopHostProcess()
+          const previous = restartStatus(ctx)
+          const lastRestart = previous.found !== true ? 'unavailable'
+            : previous.isCurrentBoot === true || previous.stage === 'ready' ? 'completed'
+              : previous.stage === 'failed' ? 'failed'
+                : ['armed', 'committed', 'waiting-old-exit', 'waiting-port', 'quiescing', 'launching', 'spawned'].includes(String(previous.stage))
+                  ? 'in-progress' : 'unknown'
+          return json(res, 200, {
+            ok: true,
+            pluginVersion: PLUGIN_VERSION,
+            lifecycle: powerTransition ?? 'ready',
+            surface: desktop ? 'desktop' : 'web',
+            capabilities: { restart: !desktop, shutdown: !desktop },
+            lastRestart,
+          })
         }
         if (sub === '/health' && req.method === 'GET') {
           const body: Record<string, unknown> = {
