@@ -21,6 +21,9 @@ child.once('close', (code) => {
 新增 `apps/desktop/src/restart-handoff.ts`。`app.relaunch()` 不传参数也不传环境，重启身份必须落盘。
 
 ```ts
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 export const DESKTOP_RESTART_ID_ENV = 'DSH_DESKTOP_RESTART_ID'
 export const DESKTOP_RESTART_PROTOCOL_ENV = 'DSH_DESKTOP_RESTART_PROTOCOL'
 export const DESKTOP_RESTART_PROTOCOL_VERSION = 1
@@ -95,6 +98,15 @@ function requestApplicationRestart(restartId: string): void {
   app.relaunch()
   quitWithoutConfirmation()
 }
+```
+
+回调必须接到构造 Host 的地方，否则请求到不了外壳：
+
+```ts
+const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject, hostInspectPort,
+  { /* 上面的环境对象 */ }, onFailure, primaryRuntime, resources,
+  (next) => { platformView.setSession(next) },
+  (restartId) => { requestApplicationRestart(restartId) })
 ```
 
 退出时会按正常流程停止 Host，此时 `stopping` 为真，该退出不会进入失败分支，恢复对话框不会出现。

@@ -21,6 +21,9 @@ child.once('close', (code) => {
 New file `apps/desktop/src/restart-handoff.ts`. `app.relaunch()` carries neither arguments nor environment, so the restart identity has to survive on disk.
 
 ```ts
+import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 export const DESKTOP_RESTART_ID_ENV = 'DSH_DESKTOP_RESTART_ID'
 export const DESKTOP_RESTART_PROTOCOL_ENV = 'DSH_DESKTOP_RESTART_PROTOCOL'
 export const DESKTOP_RESTART_PROTOCOL_VERSION = 1
@@ -95,6 +98,15 @@ function requestApplicationRestart(restartId: string): void {
   app.relaunch()
   quitWithoutConfirmation()
 }
+```
+
+The callback must be wired where the Host is constructed, or the request never reaches the shell:
+
+```ts
+const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject, hostInspectPort,
+  { /* the environment above */ }, onFailure, primaryRuntime, resources,
+  (next) => { platformView.setSession(next) },
+  (restartId) => { requestApplicationRestart(restartId) })
 ```
 
 Stopping the Host as part of quitting sets `stopping`, so that exit does not reach the failure path and no recovery dialog appears.
