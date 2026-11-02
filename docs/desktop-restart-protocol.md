@@ -2,7 +2,7 @@
 
 Desktop restart cannot be implemented inside this plugin. The Host is a child of the Electron shell, the shell treats every Host exit as a crash, and a helper spawned by the plugin would leave a second Host with no window and no IPC. Making it work requires changing DeepSeek Harness itself, which is outside this plugin's safety boundary. Review the steps below and decide whether to allow an agent to perform them on your installation. Until then this plugin refuses Desktop restart and shutdown with `503 desktop-unsupported`.
 
-**Base.** Written and compiled against DSH `687f282e86` (0.2.1-rc.2) and plugin `d817e15`. On another release compare the interfaces before copying: the constructor parameter list, the Host event union and the profile layout all change between releases. Never replace an existing parameter — append.
+**Base.** Compiled against DSH `687f282e86` (0.2.1-rc.2); the joint Electron test used plugin `0.4.33`. On another release compare the interfaces before copying: the constructor parameter list, the Host event union and the profile layout all change between releases. Never replace an existing parameter — append.
 
 ## Why the host must change
 
@@ -60,7 +60,7 @@ export function consumeRestartHandoff(path: string, now = new Date()): string | 
 }
 ```
 
-## Change 2 — accept one restart request
+## Change 2 — handle a repeated restart request
 
 `apps/desktop/src/host-process.ts`: add `{ readonly type: 'desktop-restart-requested'; readonly restartId: string }` to the event union, accept it in the validator (`typeof candidate.restartId === 'string' && candidate.restartId.length > 0`), and handle it before the shutdown branch:
 
@@ -129,13 +129,14 @@ If the shell accepts the request but does not stop the Host within 20 seconds, t
 Run these in order; any failure means the change is not ready.
 
 1. The Host child process environment contains `DSH_DESKTOP_RESTART_PROTOCOL=1`.
-2. A restart request reaches the shell once; sending it twice does not relaunch twice.
-3. The `electron` process count is unchanged after a restart and exactly one `dsh-desktop-host` child exists.
-4. The new Host reports the request's `restartId` on `/health`, with `fromInstanceId` naming the old instance.
-5. No crash report, no recovery dialog, no orphan Host. The new port may differ; the Desktop Host binds `--port 0`.
-6. An ordinary launch afterwards reports no restart, and the handoff file is gone after being read.
+2. A repeated request is not a protocol violation: the shell accepts it, relaunches at most once, and the Host keeps running.
+3. One request times out, a retry follows, and the Host survives; the restart that eventually completes carries one of the two restartIds.
+4. The `electron` process count is unchanged after a restart and exactly one `dsh-desktop-host` child exists.
+5. The new Host reports the request's `restartId` on `/health`, with `fromInstanceId` naming the old instance.
+6. No crash report, no recovery dialog, no orphan Host. The new port may differ; the Desktop Host binds `--port 0`.
+7. An ordinary launch afterwards reports no restart, and the handoff file is gone after being read.
 
 ## Remaining limits
 
-- `process.send` confirms delivery, not acceptance: if the shell cannot record the handoff it keeps running while the requester was told the restart was accepted. An explicit `restart-accepted` reply is not implemented.
+- Three states are distinct: the message being delivered, the shell accepting the request, and the restart completing. Only the first is observable here, so `process.send` confirms delivery, not acceptance: if the shell cannot record the handoff it keeps running while the requester was told the restart was accepted. An explicit `restart-accepted` reply is not implemented.
 - The Desktop surface writes no helper status, so `restartStatus` has no entry there; confirmation is `/health.restart`.

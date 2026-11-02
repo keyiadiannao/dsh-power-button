@@ -1657,7 +1657,7 @@ function sessionsQuiescent(maxWaitMs) {
  * `ok: false` and leaves this process running: the caller must be able to
  * report a failed restart instead of ending up with no process at all.
  */
-async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string, reason?: 'desktop-unsupported' }> {
+async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin, transitionToken = 0): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string, reason?: 'desktop-unsupported' }> {
   const restartId = randomUUID()
   // Inside the Desktop shell the Host is a CHILD of the Electron app, so a detached
   // helper would relaunch a bare Host with no window and no IPC. When the shell can own
@@ -1677,7 +1677,7 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     // released timer would be the only thing left that could still wedge the lock.
     const takeover = setTimeout(() => {
       handoverFailure = 'the desktop shell accepted the restart request but did not take over'
-      releasePowerTransition()
+      releasePowerTransition(transitionToken)
     }, HANDOVER_TAKEOVER_WAIT_MS)
     takeover.unref?.()
     if (!await requestShellRestart(restartId)) {
@@ -2185,7 +2185,7 @@ function logSafe(value: unknown): string {
  * Claimed on first POST, released only if the action fails synchronously
  * (the process is exiting on success, so the latch never needs clearing).
  */
-let powerTransition: 'restart' | 'shutdown' | null = null
+let powerTransition: { action: 'restart' | 'shutdown', token: number } | null = null
 
 /**
  * Why the last Desktop hand-over did not end in a relaunch, when it did not.
@@ -2200,14 +2200,28 @@ let handoverFailure: string | null = null
 /** How long a handed-over restart may take before this process assumes nothing took it. */
 const HANDOVER_TAKEOVER_WAIT_MS = 20_000
 
-function claimPowerTransition(action: 'restart' | 'shutdown'): boolean {
-  if (powerTransition !== null) return false
-  powerTransition = action
+/** Identity of the operation holding the transition, so a late release cannot free a newer one. */
+let powerTransitionSeq = 0
+
+/**
+ * Take the at-most-once latch.
+ * @param action - the transition being taken.
+ * @returns this claim's token, or null when another transition already holds it.
+ */
+function claimPowerTransition(action: 'restart' | 'shutdown'): number | null {
+  if (powerTransition !== null) return null
+  powerTransitionSeq += 1
+  powerTransition = { action, token: powerTransitionSeq }
   handoverFailure = null
-  return true
+  return powerTransitionSeq
 }
 
-function releasePowerTransition(): void {
+/**
+ * Release the latch, but only if this caller still owns it.
+ * @param token - the token returned by the matching claim.
+ */
+function releasePowerTransition(token: number): void {
+  if (powerTransition?.token !== token) return
   powerTransition = null
 }
 
@@ -2320,22 +2334,26 @@ export function apply(ctx: any, config: Config) {
           return refuse(hostFence.status === 401 ? 'not-authenticated' : 'host-fence', hostFence.status)
         }
       }
+      let transitionToken: number | null = null
       try {
         if (sub === '/restart' && req.method === 'POST') {
-          if (!claimPowerTransition('restart')) {
-            return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition}` })
+          let transitionToken: number | null = null
+          transitionToken = claimPowerTransition('restart')
+          if (transitionToken === null) {
+            return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition?.action ?? ''}` })
           }
           // A plain POST carries no causal session, and one is never guessed.
-          const result = await restartDsh(ctx, undefined, { kind: 'http' })
-          if (!result.ok) releasePowerTransition()
+          const result = await restartDsh(ctx, undefined, { kind: 'http' }, transitionToken ?? 0)
+          if (!result.ok) releasePowerTransition(transitionToken ?? 0)
           return json(res, result.ok ? 200 : result.reason === 'desktop-unsupported' ? 503 : 500, result)
         }
         if (sub === '/shutdown' && req.method === 'POST') {
-          if (!claimPowerTransition('shutdown')) {
-            return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition}` })
+          transitionToken = claimPowerTransition('shutdown')
+          if (transitionToken === null) {
+            return json(res, 409, { ok: false, error: `power transition already in progress: ${powerTransition?.action ?? ''}` })
           }
           const result = shutdownDsh(ctx, res)
-          if (!result.ok) releasePowerTransition()
+          if (!result.ok) releasePowerTransition(transitionToken ?? 0)
           return json(res, result.ok ? 200 : result.reason === 'desktop-unsupported' ? 503 : 500, result)
         }
         if (sub === '/health' && req.method === 'GET') {
@@ -2343,7 +2361,7 @@ export function apply(ctx: any, config: Config) {
             ok: true,
             instanceId: INSTANCE_ID,
             pluginVersion: PLUGIN_VERSION,
-            lifecycle: powerTransition ?? 'ready',
+            lifecycle: powerTransition?.action ?? 'ready',
             // Surfaces whether the launcher-provided exit channel resolves, so
             // a host where restarts silently fall back to process.exit is
             // diagnosable from a single request instead of from a restart that
@@ -2375,7 +2393,7 @@ export function apply(ctx: any, config: Config) {
         }
         json(res, 404, { ok: false, error: `no dsh-power-button endpoint ${sub}` })
       } catch (e) {
-        releasePowerTransition()
+        if (transitionToken !== null) releasePowerTransition(transitionToken)
         json(res, 500, { ok: false, error: e instanceof Error ? e.message : String(e) })
       }
     },
@@ -2434,8 +2452,10 @@ export function apply(ctx: any, config: Config) {
           const clamped = clampModelDelayMs(Number(a.delayMs), cfg.maxDelayMs)
           // Same at-most-once latch as the HTTP endpoints: the model tool and
           // a concurrent UI click must not spawn two helpers.
-          if (!claimPowerTransition('restart')) {
-            return { ok: false, error: `power transition already in progress: ${powerTransition}` }
+          let transitionToken: number | null = null
+          transitionToken = claimPowerTransition('restart')
+          if (transitionToken === null) {
+            return { ok: false, error: `power transition already in progress: ${powerTransition?.action ?? ''}` }
           }
           // The causal agent is the only trustworthy source for "which
           // conversation asked": read it, never infer it.
@@ -2443,8 +2463,8 @@ export function apply(ctx: any, config: Config) {
           const origin: RestartOrigin = typeof sessionId === 'string' && sessionId.length > 0
             ? { kind: 'model-tool', sessionId }
             : { kind: 'model-tool' }
-          const result = await restartDsh(ctx, clamped, origin)
-          if (!result.ok) releasePowerTransition()
+          const result = await restartDsh(ctx, clamped, origin, transitionToken ?? 0)
+          if (!result.ok) releasePowerTransition(transitionToken ?? 0)
           return result
         },
       })
@@ -2499,16 +2519,18 @@ export function apply(ctx: any, config: Config) {
           : '重启 DeepSeek Harness（重载插件与配置）',
         recordInput: false,
         async handler(invocation: { agent?: { session: { id: unknown } } }) {
-          if (!claimPowerTransition('restart')) {
-            return { kind: 'error', text: `power transition already in progress: ${powerTransition}` }
+          let transitionToken: number | null = null
+          transitionToken = claimPowerTransition('restart')
+          if (transitionToken === null) {
+            return { kind: 'error', text: `power transition already in progress: ${powerTransition?.action ?? ''}` }
           }
           // The dispatching UI's agent is the causal session for this command.
           const sessionId = invocation?.agent?.session?.id
           const origin: RestartOrigin = typeof sessionId === 'string' && sessionId.length > 0
             ? { kind: 'command', sessionId }
             : { kind: 'command' }
-          const result = await restartDsh(ctx, undefined, origin)
-          if (!result.ok) releasePowerTransition()
+          const result = await restartDsh(ctx, undefined, origin, transitionToken ?? 0)
+          if (!result.ok) releasePowerTransition(transitionToken ?? 0)
           return result.ok
             ? { kind: 'success', text: result.note }
             : { kind: 'error', text: result.error ?? (en ? 'restart failed' : '重启失败') }

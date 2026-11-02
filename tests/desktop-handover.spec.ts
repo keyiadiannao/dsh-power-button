@@ -165,4 +165,41 @@ describe('Desktop hand-over', () => {
     // Nothing was handed over, so nothing may stay locked.
     expect((await app.post('restart')).status).not.toBe(409)
   })
+
+  it('does not let a superseded operation release the next one', async () => {
+    // The failure this guards against: operation A's hand-over hangs, its watchdog releases
+    // the transition, B claims it, and only then does A answer. Releasing on A's behalf must
+    // not free B's claim, or two restarts could run at once.
+    const late: { callback: ((error: Error | null) => void) | null } = { callback: null }
+    let sends = 0
+    stubSend((_message, callback) => {
+      sends += 1
+      if (sends === 1) {
+        late.callback = callback
+        return true
+      }
+      callback(null)
+      return true
+    })
+    const app = mount(acceptingSend([]))
+
+    const pending = app.post('restart')
+    await vi.advanceTimersByTimeAsync(50)
+    expect(sends).toBe(1)
+
+    // A's watchdog releases the transition.
+    await vi.advanceTimersByTimeAsync(20_001)
+    // B claims it and its hand-over is accepted.
+    expect((await app.post('restart')).status).toBe(200)
+
+    // A finally answers, unsuccessfully.
+    late.callback?.(new Error('channel closed late'))
+    await vi.advanceTimersByTimeAsync(50)
+
+    // B still owns the transition, so a third request cannot start a second restart.
+    expect((await app.post('restart')).status).toBe(409)
+    // Let the promise settle so the run does not leak an unawaited rejection.
+    await vi.advanceTimersByTimeAsync(50)
+    void pending
+  })
 })

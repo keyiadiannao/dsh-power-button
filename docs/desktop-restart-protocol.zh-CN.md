@@ -2,7 +2,7 @@
 
 桌面端重启无法在插件内实现。Host 是 Electron 外壳的子进程，外壳把 Host 的任何退出都当作崩溃，而插件自行 spawn 的 helper 只会留下一个没有窗口、没有 IPC 的第二份 Host。要实现它必须修改 DeepSeek Harness 本身，这超出本插件的安全边界。请先看下面的步骤，再决定是否允许你的 agent 在当前安装上执行。在此之前，本插件在桌面端拒绝重启与关机，返回 `503 desktop-unsupported`。
 
-**基线。** 本文按 DSH `687f282e86`（0.2.1-rc.2）与插件 `d817e15` 编写并编译通过。换了版本要先比对接口再抄代码：构造函数参数、Host 事件联合类型、profile 布局在各版本之间都会变。**不要替换已有参数，只往后追加。**
+**基线。** 宿主补丁按 DSH `687f282e86`（0.2.1-rc.2）编译通过；与真机 Electron 联调用的是插件 `0.4.33`。换了版本要先比对接口再抄代码：构造函数参数、Host 事件联合类型、profile 布局在各版本之间都会变。**不要替换已有参数，只往后追加。**
 
 ## 为什么必须改宿主
 
@@ -58,7 +58,7 @@ export function consumeRestartHandoff(path: string, now = new Date()): string | 
 }
 ```
 
-## 改动 2 — 只接受一次重启请求
+## 改动 2 — 幂等处理重复的重启请求
 
 `apps/desktop/src/host-process.ts`：在事件联合类型中加入 `{ readonly type: 'desktop-restart-requested'; readonly restartId: string }`，校验函数接受它（`typeof candidate.restartId === 'string' && candidate.restartId.length > 0`），并在关机分支之前处理：
 
@@ -127,13 +127,14 @@ const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject
 按顺序执行，任一条不通过就说明改动未就绪。
 
 1. Host 子进程环境里有 `DSH_DESKTOP_RESTART_PROTOCOL=1`
-2. 重启请求只到达外壳一次；重复发送不会 relaunch 第二次
-3. 重启后 `electron` 进程数不变，且只有一个 `dsh-desktop-host` 子进程
-4. 新 Host 的 `/health` 报出与请求一致的 `restartId`，`fromInstanceId` 是旧实例
-5. 无崩溃报告、无恢复对话框、无孤儿 Host；新端口可以不同（桌面端绑定 `--port 0`）
-6. 之后一次普通启动不报重启，且交接记录在读取后已删除
+2. 重复请求不算协议违规：外壳照常接受、最多 relaunch 一次，Host 保持运行
+3. 一次请求超时后再重试，Host 不崩溃；最终完成的重启携带其中一个 restartId
+4. 重启后 `electron` 进程数不变，且只有一个 `dsh-desktop-host` 子进程
+5. 新 Host 的 `/health` 报出与请求一致的 `restartId`，`fromInstanceId` 是旧实例
+6. 无崩溃报告、无恢复对话框、无孤儿 Host；新端口可以不同（桌面端绑定 `--port 0`）
+7. 之后一次普通启动不报重启，且交接记录在读取后已删除
 
 ## 已知限制
 
-- `process.send` 只证明消息送达，不证明外壳已接受：若外壳写交接记录失败，它会保持运行，而请求方已被告知接受。显式的 `restart-accepted` 回执尚未实现。
+- 三个状态是分开的：消息送达、外壳接受、重启完成。这里只能观察到第一个，因此 `process.send` 只证明送达，不证明接受：若外壳写交接记录失败，它会保持运行，而请求方已被告知接受。显式的 `restart-accepted` 回执尚未实现。
 - 桌面端不生成 helper，因此 `restartStatus` 没有条目，确认只看 `/health.restart`。
