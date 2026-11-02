@@ -66,17 +66,14 @@ export function consumeRestartHandoff(path: string, now = new Date()): string | 
 
 ```ts
 else if (message.type === 'desktop-restart-requested') {
-  // Once, and only before the shell starts stopping: a repeat would relaunch a second app.
-  if (this.restartRequest === undefined && !this.stopping) {
-    this.restartRequest = message.restartId
-    this.onRestartRequested?.(message.restartId)
-  } else if (this.restartRequest !== message.restartId) {
-    this.fail(new Error('dsh desktop host requested a restart the shell did not ask for'))
-  }
+  // Idempotent on purpose: the Host may ask again after a hand-over it could not
+  // complete. Treating a repeat as a protocol violation kills a healthy app, which is
+  // worse than a second no-op request; the relaunch below is guarded on its own.
+  if (!this.stopping) this.onRestartRequested?.(message.restartId)
 }
 ```
 
-Append `onRestartRequested?: (restartId: string) => void` to the constructor and add the `restartRequest: string | undefined` field it fills.
+Append `onRestartRequested?: (restartId: string) => void` to the constructor. Do not track a "current" restartId to reject a repeat: a host that saw its first request go nowhere will legitimately ask again, and the relaunch is already idempotent (`relaunchRequested`).
 
 ## Change 3 — record, then relaunch once
 

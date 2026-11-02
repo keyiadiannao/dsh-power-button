@@ -64,17 +64,14 @@ export function consumeRestartHandoff(path: string, now = new Date()): string | 
 
 ```ts
 else if (message.type === 'desktop-restart-requested') {
-  // 只接受一次，且必须在开始停止之前：重复请求会拉起第二个应用。
-  if (this.restartRequest === undefined && !this.stopping) {
-    this.restartRequest = message.restartId
-    this.onRestartRequested?.(message.restartId)
-  } else if (this.restartRequest !== message.restartId) {
-    this.fail(new Error('dsh desktop host requested a restart the shell did not ask for'))
-  }
+  // 刻意做成幂等：Host 在一次没能完成的交接之后会合理地问第二次。
+  // 把重复请求当作协议违规会杀掉一个健康的应用，比多一次空操作更糟；
+  // 真正的拉起本身已经用 relaunchRequested 做了幂等保护。
+  if (!this.stopping) this.onRestartRequested?.(message.restartId)
 }
 ```
 
-构造函数追加 `onRestartRequested?: (restartId: string) => void`，并新增字段 `restartRequest: string | undefined`。
+构造函数追加 `onRestartRequested?: (restartId: string) => void`。不要记录一个「当前 restartId」来拒绝重复请求：第一次请求没被接手的宿主会合理地再问一次，而拉起本身已经幂等（`relaunchRequested`）。
 
 ## 改动 3 — 记录后 relaunch 一次
 
