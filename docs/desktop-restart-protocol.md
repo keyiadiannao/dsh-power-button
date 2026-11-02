@@ -2,6 +2,8 @@
 
 Desktop restart cannot be implemented inside this plugin. The Host is a child of the Electron shell, the shell treats every Host exit as a crash, and a helper spawned by the plugin would leave a second Host with no window and no IPC. Making it work requires changing DeepSeek Harness itself, which is outside this plugin's safety boundary. Review the steps below and decide whether to allow an agent to perform them on your installation. Until then this plugin refuses Desktop restart and shutdown with `503 desktop-unsupported`.
 
+**Base.** Written and compiled against DSH `687f282e86` (0.2.1-rc.2) and plugin `d817e15`. On another release compare the interfaces before copying: the constructor parameter list, the Host event union and the profile layout all change between releases. Never replace an existing parameter — append.
+
 ## Why the host must change
 
 `apps/desktop/src/host-process.ts` records every Host exit as a failure, exit code 0 included, so a requested exit is indistinguishable from a crash:
@@ -21,7 +23,7 @@ child.once('close', (code) => {
 New file `apps/desktop/src/restart-handoff.ts`. `app.relaunch()` carries neither arguments nor environment, so the restart identity has to survive on disk.
 
 ```ts
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export const DESKTOP_RESTART_ID_ENV = 'DSH_DESKTOP_RESTART_ID'
@@ -33,21 +35,28 @@ export function restartHandoffPath(userData: string): string {
 }
 
 export function writeRestartHandoff(path: string, restartId: string, now = new Date()): void {
-  writeFileSync(path, JSON.stringify({ schemaVersion: 1, restartId, requestedAt: now.toISOString(), pid: process.pid }),
+  // Write beside the target, then rename: a crash mid-write must not leave a half
+  // record that the next launch reads as a restart.
+  const temporary = `${path}.tmp`
+  writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, restartId, requestedAt: now.toISOString(), pid: process.pid }),
     { encoding: 'utf8', mode: 0o600 })
+  renameSync(temporary, path)
 }
 
 /** Read-and-delete, so an ordinary launch cannot claim a restart it did not request. */
 export function consumeRestartHandoff(path: string, now = new Date()): string | undefined {
   let text: string
   try { text = readFileSync(path, 'utf8') } catch { return undefined }
-  try { rmSync(path, { force: true }) } catch { /* the launch proceeds either way */ }
+  // Consuming is only safe once the record is gone: a failed delete would let the next
+  // launch claim the same restart again, so report absent and leave it alone.
+  try { rmSync(path, { force: true }) } catch { return undefined }
   let parsed: { schemaVersion?: unknown, restartId?: unknown, requestedAt?: unknown } | null
   try { parsed = JSON.parse(text) } catch { return undefined }
   if (parsed === null || parsed.schemaVersion !== 1 || typeof parsed.restartId !== 'string'
     || parsed.restartId.length === 0 || typeof parsed.requestedAt !== 'string') return undefined
   const age = now.getTime() - Date.parse(parsed.requestedAt)
-  return Number.isFinite(age) && age <= 60 * 60 * 1000 ? parsed.restartId : undefined
+  // Both bounds matter: a future timestamp means the clock moved, not that a restart happened.
+  return Number.isFinite(age) && age >= 0 && age <= 60 * 60 * 1000 ? parsed.restartId : undefined
 }
 ```
 
@@ -67,7 +76,7 @@ else if (message.type === 'desktop-restart-requested') {
 }
 ```
 
-Add the optional constructor callback `onRestartRequested?: (restartId: string) => void` and the `restartRequest: string | undefined` field it fills.
+Append `onRestartRequested?: (restartId: string) => void` to the constructor and add the `restartRequest: string | undefined` field it fills.
 
 ## Change 3 — record, then relaunch once
 
@@ -100,12 +109,13 @@ function requestApplicationRestart(restartId: string): void {
 }
 ```
 
-The callback must be wired where the Host is constructed, or the request never reaches the shell:
+The callback must be wired where the Host is constructed, or the request never reaches the shell. **Append** it after the existing arguments — newer releases already pass `onPluginOperation` as the last parameter, and replacing it breaks plugin diagnostics:
 
 ```ts
 const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject, hostInspectPort,
   { /* the environment above */ }, onFailure, primaryRuntime, resources,
   (next) => { platformView.setSession(next) },
+  (record) => { /* existing onPluginOperation wiring, if this release has one */ },
   (restartId) => { requestApplicationRestart(restartId) })
 ```
 
@@ -113,7 +123,7 @@ Stopping the Host as part of quitting sets `stopping`, so that exit does not rea
 
 ## Plugin side
 
-Once the shell advertises the protocol, the plugin needs its capability branch back: gate on a positive `DSH_DESKTOP_RESTART_PROTOCOL`, claim with `DSH_POWER_RESTART_ID ?? DSH_DESKTOP_RESTART_ID`, write a v2 marker, flush, then send `desktop-restart-requested`. That code exists in PR #9 (closed, unmerged) and can be reused as-is.
+Nothing to patch: plugin 0.4.32 and later already implement both halves - the capability gate on `DSH_DESKTOP_RESTART_PROTOCOL` (a positive integer, with the IPC channel connected), the claim using `DSH_POWER_RESTART_ID ?? DSH_DESKTOP_RESTART_ID`, marker lookup by `restartId` instead of by port, and the hand-over itself. On an older plugin, update it first; it starts using the shell the moment the advertisement appears, and keeps refusing while it does not.
 
 ## Acceptance
 
@@ -128,5 +138,5 @@ Run these in order; any failure means the change is not ready.
 
 ## Remaining limits
 
-- `process.send` confirms delivery, not acceptance: if the shell cannot record the handoff it keeps running while the requester was told the restart was accepted.
+- `process.send` confirms delivery, not acceptance: if the shell cannot record the handoff it keeps running while the requester was told the restart was accepted. An explicit `restart-accepted` reply is not implemented.
 - The Desktop surface writes no helper status, so `restartStatus` has no entry there; confirmation is `/health.restart`.

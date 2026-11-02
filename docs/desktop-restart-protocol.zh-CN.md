@@ -2,6 +2,8 @@
 
 桌面端重启无法在插件内实现。Host 是 Electron 外壳的子进程，外壳把 Host 的任何退出都当作崩溃，而插件自行 spawn 的 helper 只会留下一个没有窗口、没有 IPC 的第二份 Host。要实现它必须修改 DeepSeek Harness 本身，这超出本插件的安全边界。请先看下面的步骤，再决定是否允许你的 agent 在当前安装上执行。在此之前，本插件在桌面端拒绝重启与关机，返回 `503 desktop-unsupported`。
 
+**基线。** 本文按 DSH `687f282e86`（0.2.1-rc.2）与插件 `d817e15` 编写并编译通过。换了版本要先比对接口再抄代码：构造函数参数、Host 事件联合类型、profile 布局在各版本之间都会变。**不要替换已有参数，只往后追加。**
+
 ## 为什么必须改宿主
 
 `apps/desktop/src/host-process.ts` 把 Host 的每次退出都记为失败，退出码 0 也一样，所以"被请求的退出"和"崩溃"分不开：
@@ -21,7 +23,7 @@ child.once('close', (code) => {
 新增 `apps/desktop/src/restart-handoff.ts`。`app.relaunch()` 不传参数也不传环境，重启身份必须落盘。
 
 ```ts
-import { readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export const DESKTOP_RESTART_ID_ENV = 'DSH_DESKTOP_RESTART_ID'
@@ -33,21 +35,26 @@ export function restartHandoffPath(userData: string): string {
 }
 
 export function writeRestartHandoff(path: string, restartId: string, now = new Date()): void {
-  writeFileSync(path, JSON.stringify({ schemaVersion: 1, restartId, requestedAt: now.toISOString(), pid: process.pid }),
+  // 先写旁边的临时文件再 rename：写到一半崩溃，不能让下一次启动读成"这是一次重启"。
+  const temporary = `${path}.tmp`
+  writeFileSync(temporary, JSON.stringify({ schemaVersion: 1, restartId, requestedAt: now.toISOString(), pid: process.pid }),
     { encoding: 'utf8', mode: 0o600 })
+  renameSync(temporary, path)
 }
 
 /** 读取即删除：普通启动不可能认领一次它没有发起的重启。 */
 export function consumeRestartHandoff(path: string, now = new Date()): string | undefined {
   let text: string
   try { text = readFileSync(path, 'utf8') } catch { return undefined }
-  try { rmSync(path, { force: true }) } catch { /* 启动照常进行 */ }
+  // 只有记录真的删掉了才算消费：删除失败还返回 restartId，下一次启动会重复认领。
+  try { rmSync(path, { force: true }) } catch { return undefined }
   let parsed: { schemaVersion?: unknown, restartId?: unknown, requestedAt?: unknown } | null
   try { parsed = JSON.parse(text) } catch { return undefined }
   if (parsed === null || parsed.schemaVersion !== 1 || typeof parsed.restartId !== 'string'
     || parsed.restartId.length === 0 || typeof parsed.requestedAt !== 'string') return undefined
   const age = now.getTime() - Date.parse(parsed.requestedAt)
-  return Number.isFinite(age) && age <= 60 * 60 * 1000 ? parsed.restartId : undefined
+  // 两端都要卡：时间戳在未来说明时钟被调过，不代表发生过重启。
+  return Number.isFinite(age) && age >= 0 && age <= 60 * 60 * 1000 ? parsed.restartId : undefined
 }
 ```
 
@@ -67,7 +74,7 @@ else if (message.type === 'desktop-restart-requested') {
 }
 ```
 
-构造函数追加可选回调 `onRestartRequested?: (restartId: string) => void` 与字段 `restartRequest: string | undefined`。
+构造函数追加 `onRestartRequested?: (restartId: string) => void`，并新增字段 `restartRequest: string | undefined`。
 
 ## 改动 3 — 记录后 relaunch 一次
 
@@ -100,12 +107,13 @@ function requestApplicationRestart(restartId: string): void {
 }
 ```
 
-回调必须接到构造 Host 的地方，否则请求到不了外壳：
+回调必须接到构造 Host 的地方，否则请求到不了外壳。**追加在已有参数之后**——较新的版本最后一个是 `onPluginOperation`，替换掉它插件诊断就断了：
 
 ```ts
 const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject, hostInspectPort,
   { /* 上面的环境对象 */ }, onFailure, primaryRuntime, resources,
   (next) => { platformView.setSession(next) },
+  (record) => { /* 该版本已有的 onPluginOperation 接线 */ },
   (restartId) => { requestApplicationRestart(restartId) })
 ```
 
@@ -113,7 +121,7 @@ const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject
 
 ## 插件侧
 
-外壳广播该协议后，插件需要恢复它的能力分支：以正整数 `DSH_DESKTOP_RESTART_PROTOCOL` 为门槛，用 `DSH_POWER_RESTART_ID ?? DSH_DESKTOP_RESTART_ID` 认领，写 v2 marker、有界 flush，然后发送 `desktop-restart-requested`。这部分代码在 PR #9（已关闭、未合并）里，可直接复用。
+不需要打补丁：0.4.32 起的插件已经实现两半——能力门槛（`DSH_DESKTOP_RESTART_PROTOCOL` 为正整数，且 IPC 通道已连接）、用 `DSH_POWER_RESTART_ID ?? DSH_DESKTOP_RESTART_ID` 认领、按 `restartId` 而不是按端口查找 marker，以及交接本身。插件更早就先升级；一旦宿主广播该变量，插件立刻开始使用外壳，没有广播则继续拒绝。
 
 ## 验收
 
@@ -128,5 +136,5 @@ const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject
 
 ## 已知限制
 
-- `process.send` 只证明消息送达，不证明外壳已接受：若外壳写交接记录失败，它会保持运行，而请求方已被告知接受。
+- `process.send` 只证明消息送达，不证明外壳已接受：若外壳写交接记录失败，它会保持运行，而请求方已被告知接受。显式的 `restart-accepted` 回执尚未实现。
 - 桌面端不生成 helper，因此 `restartStatus` 没有条目，确认只看 `/health.restart`。

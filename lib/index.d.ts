@@ -62,20 +62,19 @@ interface RestartOrigin {
 /** Record restart intent. Exported for tests (isolated via DSH_HOME). */
 declare function writeMarker(data: Record<string, unknown>): void;
 /**
- * Whether THIS process is the freshly-restarted instance. Exported for tests.
- *
- * Two marker generations are accepted:
- *  - **v2** (current): the helper writes the marker BEFORE spawning the new
- *    process and binds it to that boot with a `DSH_POWER_RESTART_ID` token in
- *    the child's environment. A marker only counts when the env token matches,
- *    so a manual boot can never claim a restart — and because the marker
- *    already exists when the child starts, the new instance can never read
- *    "no marker yet" (the v1 race, where the helper confirmed the relaunch
- *    only after the child had spawned).
- *  - **v1** (plugin 0.2.2 helpers): the helper confirmed the relaunch AFTER
- *    spawning by recording the exact child pid. Still accepted so the first
- *    restart performed by a pre-upgrade detached helper still reports.
+ * The protocol generation a shell advertised, or undefined when it advertised none.
+ * @param advertised - raw value of the protocol variable, or undefined.
+ * @returns the generation when it is a positive integer.
  */
+declare function advertisedDesktopRestartProtocol(advertised: string | undefined): number | undefined;
+/**
+ * Whether this Host can hand its restart to the Desktop shell.
+ *
+ * Both halves are required: the shell must advertise the protocol, and the IPC channel
+ * the request travels over must be connected. A Host that satisfies only one falls back
+ * to refusing the action instead of exiting into nothing.
+ */
+declare function desktopShellRestartAvailable(): boolean;
 declare function consumeRestartConfirmation(): {
   fromInstanceId: string;
   restartId?: string;
@@ -554,4 +553,4 @@ declare function connectionRejection(ctx: any, req: {
 }): HostFenceVerdict;
 declare function apply(ctx: any, config: Config): void;
 //#endregion
-export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, HostFenceVerdict, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };
+export { APP_EXIT_WATCHDOG_MS, Config, EnvRegistryValue, HostFenceVerdict, PRE_EXIT_FLUSH_CAP_MS, PowerTrustRejectReason, PreExitFlushOutcome, RestartHelperPayload, RestartOrigin, advertisedDesktopRestartProtocol, apply, boundHostOf, buildRestartHelper, clampModelDelayMs, connectionRejection, consumeRestartConfirmation, declaredTrustedHosts, deliverPendingNotices, desktopShellRestartAvailable, explainPowerRequestTrust, flushSessionsBounded, helperOldPidWaitMs, inject, isTrustedPowerRequest, markerPath, mergeEnvironment, name, parseEnvRegExport, pinRelaunchPort, preExitBudgetMs, pruneOldRestartLogs, queueRestartNotice, reconcileLateRestartClaim, redactCommandLine, requestAppExit, restartNoticeSummary, restartNoticeText, restartStatus, shutdownDsh, writeMarker };

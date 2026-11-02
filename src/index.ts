@@ -232,22 +232,120 @@ function readRestartOrigin(value: unknown): RestartOrigin | undefined {
  *    spawning by recording the exact child pid. Still accepted so the first
  *    restart performed by a pre-upgrade detached helper still reports.
  */
+/**
+ * Protocol generation the Desktop shell advertises when it can own a restart.
+ *
+ * The shell spawns the Host with this variable once it accepts restart requests. Its
+ * presence is the capability: argv and profile names describe how a process was
+ * launched, not which lifecycle protocol the shell speaks.
+ */
+const DESKTOP_RESTART_PROTOCOL_ENV = 'DSH_DESKTOP_RESTART_PROTOCOL'
+
+/** Restart identity the Desktop shell injects into the Host it respawned. */
+const DESKTOP_RESTART_ID_ENV = 'DSH_DESKTOP_RESTART_ID'
+
+/**
+ * The protocol generation a shell advertised, or undefined when it advertised none.
+ * @param advertised - raw value of the protocol variable, or undefined.
+ * @returns the generation when it is a positive integer.
+ */
+export function advertisedDesktopRestartProtocol(advertised: string | undefined): number | undefined {
+  if (advertised === undefined || advertised === '') return undefined
+  const generation = Number(advertised)
+  return Number.isInteger(generation) && generation >= 1 ? generation : undefined
+}
+
+/**
+ * Whether this Host can hand its restart to the Desktop shell.
+ *
+ * Both halves are required: the shell must advertise the protocol, and the IPC channel
+ * the request travels over must be connected. A Host that satisfies only one falls back
+ * to refusing the action instead of exiting into nothing.
+ */
+export function desktopShellRestartAvailable(): boolean {
+  if (advertisedDesktopRestartProtocol(process.env[DESKTOP_RESTART_PROTOCOL_ENV]) === undefined) return false
+  return typeof process.send === 'function' && process.connected === true
+}
+
+/**
+ * Ask the Desktop shell to restart the application.
+ *
+ * The shell owns the relaunch: this process is its child, so a detached helper would
+ * start a second Host with no window and no IPC. Resolving means the shell took the
+ * request, not that the successor is already up.
+ * @param restartId - identity of the restart being handed over.
+ * @returns whether the shell accepted the request.
+ */
+async function requestShellRestart(restartId: string): Promise<boolean> {
+  const send = process.send
+  if (typeof send !== 'function' || process.connected !== true) return false
+  try {
+    await new Promise<void>((resolve, reject) => {
+      send.call(process, { type: 'desktop-restart-requested', restartId }, (error: Error | null) => {
+        if (error === null || error === undefined) resolve()
+        else reject(error)
+      })
+    })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Locate a v2 marker by its restartId across every port key.
+ * @param restartId - the restartId carried by this process's launch identity.
+ * @returns the marker and the file it came from, or null.
+ */
+function findMarkerByRestartId(restartId: string): { file: string, marker: Record<string, unknown> } | null {
+  let names: string[]
+  try {
+    names = fs.readdirSync(RUNTIME_DIR)
+  } catch {
+    return null
+  }
+  for (const name of names) {
+    if (!/^dsh-power-marker-.*\.json$/u.test(name)) continue
+    const file = path.join(RUNTIME_DIR, name)
+    try {
+      const marker = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>
+      if (marker !== null && typeof marker === 'object' && marker.schemaVersion === 2 && marker.restartId === restartId) {
+        return { file, marker }
+      }
+    } catch { /* unreadable marker: skip it */ }
+  }
+  return null
+}
+
 export function consumeRestartConfirmation(): { fromInstanceId: string, restartId?: string, origin?: RestartOrigin } | null {
   // Read-and-delete the launch token FIRST: it belongs to this boot's judgment
   // only, and must not leak to MCP children or survive into a later decision.
-  const envRestartId = process.env.DSH_POWER_RESTART_ID
+  // Two launch identities exist: the helper's token on the Web surface, and the Desktop
+  // shell's token after it respawned this Host. Either is authoritative for this process.
+  const envRestartId = process.env.DSH_POWER_RESTART_ID ?? process.env[DESKTOP_RESTART_ID_ENV]
   delete process.env.DSH_POWER_RESTART_ID
-  const marker = readMarker()
+  delete process.env[DESKTOP_RESTART_ID_ENV]
+  // The Desktop Host binds a fresh port every launch, so the marker is found by the
+  // launch identity rather than by this process's own port.
+  let marker = readMarker()
+  let markerFile = markerPath()
+  if (envRestartId !== undefined) {
+    const match = findMarkerByRestartId(envRestartId)
+    if (match !== null) {
+      marker = match.marker
+      markerFile = match.file
+    }
+  }
   if (marker === null) return null
   const oldId = marker.fromInstanceId
   if (typeof oldId !== 'string' || oldId === INSTANCE_ID) {
     // Stale or self-referential marker: clear it and report nothing.
-    try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
+    try { fs.unlinkSync(markerFile) } catch { /* ignore */ }
     return null
   }
   const origin = readRestartOrigin(marker.origin)
   if (marker.schemaVersion === 2 && typeof marker.restartId === 'string') {
-    try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
+    try { fs.unlinkSync(markerFile) } catch { /* ignore */ }
     // Without the matching launch token this is an unrelaunched intent (the
     // helper died before spawning) or a MANUAL boot: neither may claim the
     // restart, and the leftover marker is cleared so it cannot linger.
@@ -260,7 +358,7 @@ export function consumeRestartConfirmation(): { fromInstanceId: string, restartI
   const relaunched = typeof marker.relaunchedAt === 'string'
     && Number.isInteger(marker.newPid)
     && (marker.newPid as number) === process.pid
-  try { fs.unlinkSync(markerPath()) } catch { /* ignore */ }
+  try { fs.unlinkSync(markerFile) } catch { /* ignore */ }
   if (!relaunched) return null
   return { fromInstanceId: oldId, ...(origin !== undefined ? { origin } : {}) }
 }
@@ -1561,6 +1659,32 @@ function sessionsQuiescent(maxWaitMs) {
  */
 async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Promise<{ ok: boolean, action: 'restart', restartId: string, note?: string, error?: string, reason?: 'desktop-unsupported' }> {
   const restartId = randomUUID()
+  // Inside the Desktop shell the Host is a CHILD of the Electron app, so a detached
+  // helper would relaunch a bare Host with no window and no IPC. When the shell can own
+  // the relaunch, hand it over; otherwise refuse, because exiting would leave nothing to
+  // bring the application back.
+  if (desktopShellRestartAvailable()) {
+    writeMarker({
+      schemaVersion: 2,
+      restartId,
+      fromInstanceId: INSTANCE_ID,
+      origin: origin ?? null,
+      requestedAt: new Date().toISOString(),
+    })
+    const flushed = await flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS)
+    logFlushOutcome('restart', flushed)
+    if (!await requestShellRestart(restartId)) {
+      return { ok: false, action: 'restart', restartId, error: 'the desktop shell did not accept the restart request' }
+    }
+    return {
+      ok: true,
+      action: 'restart',
+      restartId,
+      note: isEnglishLocale(ctx)
+        ? 'DeepSeek Harness is restarting through the desktop shell: this window closes and the app relaunches itself.'
+        : '深度求索 Harness 正通过桌面外壳重启：窗口会关闭，应用会自行重新拉起。',
+    }
+  }
   if (isDesktopHostProcess()) {
     return { ok: false, action: 'restart', restartId, reason: 'desktop-unsupported', error: desktopPowerError(isEnglishLocale(ctx)) }
   }
