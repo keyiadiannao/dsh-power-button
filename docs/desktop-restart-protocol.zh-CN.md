@@ -123,6 +123,8 @@ const host = new DesktopHostProcess(resources.node, resources.dsh, activeProject
 
 不需要打补丁：0.4.32 起的插件已经实现两半——能力门槛（`DSH_DESKTOP_RESTART_PROTOCOL` 为正整数，且 IPC 通道已连接）、用 `DSH_POWER_RESTART_ID ?? DSH_DESKTOP_RESTART_ID` 认领、按 `restartId` 而不是按端口查找 marker，以及交接本身。插件更早就先升级；一旦宿主广播该变量，插件立刻开始使用外壳，没有广播则继续拒绝。
 
+若外壳收下了请求却 20 秒内没有停掉 Host，插件会记录这次失败、释放操作锁，并在 `/health` 里以 `powerFailure` 报出，因此下一次尝试不会一直拿到 `409`。
+
 ## 验收
 
 按顺序执行，任一条不通过就说明改动未就绪。

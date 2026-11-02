@@ -125,6 +125,8 @@ Stopping the Host as part of quitting sets `stopping`, so that exit does not rea
 
 Nothing to patch: plugin 0.4.32 and later already implement both halves - the capability gate on `DSH_DESKTOP_RESTART_PROTOCOL` (a positive integer, with the IPC channel connected), the claim using `DSH_POWER_RESTART_ID ?? DSH_DESKTOP_RESTART_ID`, marker lookup by `restartId` instead of by port, and the hand-over itself. On an older plugin, update it first; it starts using the shell the moment the advertisement appears, and keeps refusing while it does not.
 
+If the shell accepts the request but does not stop the Host within 20 seconds, the plugin records the failure, releases the operation lock, and reports it on `/health` as `powerFailure`, so the next attempt is not answered with `409`.
+
 ## Acceptance
 
 Run these in order; any failure means the change is not ready.

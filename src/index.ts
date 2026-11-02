@@ -7,7 +7,7 @@
  * an independent repo that works standalone).
  *
  * Endpoints:
- *   POST /api/dsh-power-button/restart   — relaunch DSH (detached helper)
+ *   POST /api/dsh-power-button/restart   — relaunch DSH (detached helper, or the Desktop shell)
  *   POST /api/dsh-power-button/shutdown  — stop DSH (graceful exit, no relaunch)
  *   GET  /api/dsh-power-button/health    — liveness probe for the client flow
  *
@@ -1673,7 +1673,15 @@ async function restartDsh(ctx: any, delayMs = 1500, origin?: RestartOrigin): Pro
     })
     const flushed = await flushSessionsBounded(ctx, PRE_EXIT_FLUSH_CAP_MS)
     logFlushOutcome('restart', flushed)
+    // Armed before the send: a shell that fires may never complete the reply, and a
+    // released timer would be the only thing left that could still wedge the lock.
+    const takeover = setTimeout(() => {
+      handoverFailure = 'the desktop shell accepted the restart request but did not take over'
+      releasePowerTransition()
+    }, HANDOVER_TAKEOVER_WAIT_MS)
+    takeover.unref?.()
     if (!await requestShellRestart(restartId)) {
+      clearTimeout(takeover)
       return { ok: false, action: 'restart', restartId, error: 'the desktop shell did not accept the restart request' }
     }
     return {
@@ -2179,9 +2187,23 @@ function logSafe(value: unknown): string {
  */
 let powerTransition: 'restart' | 'shutdown' | null = null
 
+/**
+ * Why the last Desktop hand-over did not end in a relaunch, when it did not.
+ *
+ * The shell owns the relaunch there, so this process stays alive by design. If it is
+ * still alive after the wait below, nothing took over: the transition has to be released
+ * and the failure named, or every later power request answers 409 until the user restarts
+ * by hand.
+ */
+let handoverFailure: string | null = null
+
+/** How long a handed-over restart may take before this process assumes nothing took it. */
+const HANDOVER_TAKEOVER_WAIT_MS = 20_000
+
 function claimPowerTransition(action: 'restart' | 'shutdown'): boolean {
   if (powerTransition !== null) return false
   powerTransition = action
+  handoverFailure = null
   return true
 }
 
@@ -2331,6 +2353,7 @@ export function apply(ctx: any, config: Config) {
           // Restart IDENTITY: permanent for this process's lifetime — the
           // helper (waitForReady) and future diagnostics read it regardless
           // of whether the toast has been acknowledged.
+          if (handoverFailure !== null) body.powerFailure = handoverFailure
           if (bootRestart !== null) {
             body.restart = { restartId: bootRestart.restartId, fromInstanceId: bootRestart.fromInstanceId }
           }
@@ -2370,12 +2393,14 @@ export function apply(ctx: any, config: Config) {
         name: 'restart_harness',
         description: isEnglishLocale(ctx)
           ? 'Restart the whole DeepSeek Harness process to reload plugins and config (profile cordis layers, settings, etc). '
-            + 'Provided by dsh-power-button (standalone): spawns a detached helper that takes ownership of the relaunch, then this process exits; '
-            + 'once the old process is gone and its port is free, the helper relaunches DSH with the same command line and cwd. '
+            + 'Provided by dsh-power-button (standalone). On a plain host it spawns a detached helper that takes ownership of the relaunch, then this process exits; '
+            + 'in the Desktop app, when that app advertises a restart protocol, the restart is handed to its Electron shell instead. '
+            + 'Once the old process is gone and its port is free, DSH is relaunched with the same command line and cwd. '
             + 'The current session connection drops briefly and the page auto-reconnects. Returns ok and a note.'
           : '重启整个 DeepSeek Harness 进程，用于重新加载插件与配置（profile 的 cordis 组合、settings 等）。'
-            + '由 dsh-power-button 提供（独立实现）：派生一个 detach 的 helper 接管拉起职责，随后本进程退出；'
-            + '待旧进程消失且端口释放后，helper 以原命令行在原目录重新拉起 DSH。'
+            + '由 dsh-power-button 提供（独立实现）。普通宿主上派生一个 detach 的 helper 接管拉起职责，随后本进程退出；'
+            + '桌面版若宿主广播了重启协议，则改为交给它的 Electron 外壳重启。'
+            + '待旧进程消失且端口释放后，以原命令行在原目录重新拉起 DSH。'
             + '触发后当前会话连接会短暂中断，网页随后自动重连到新进程。'
             + '返回 ok 与说明文本。',
         parameters: {

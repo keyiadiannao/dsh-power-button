@@ -13,7 +13,7 @@ A self-contained **power & lifecycle controller** for [DeepSeek Harness](https:/
 
 - **Sidebar power button** in the footer action slot, theme-aware and styled to match the adjacent Settings trigger.
 - **Restart / Shutdown menu** with a Windows-style full-screen overlay; the page reloads by itself after a confirmed restart.
-- **Self-contained restart engine**: a detached `.cjs` helper takes over relaunching DSH through an ARM → COMMIT → ACK handshake, waits for the old process, the port and the session logs, then relaunches the same invocation in the same cwd. A `--port 0` command line is pinned to the port the old process actually bound. No PowerShell, no `taskkill`.
+- **Self-contained restart engine**: a detached `.cjs` helper takes over relaunching DSH through an ARM → COMMIT → ACK handshake, waits for the old process, the port and the session logs, then relaunches the same invocation in the same cwd. A `--port 0` command line is pinned to the port the old process actually bound. In the Desktop app the restart is handed to Electron instead, when that app advertises a restart protocol. No PowerShell, no `taskkill`.
 - **`/restart` and `/shutdown` commands**, a **`restart_harness` model tool** (registration is skipped when another plugin already owns the name), and a read-only **`restart_status`** tool for checking whether a restart happened.
 - **Localized UI and host notices** (zh / en), following the profile's `locale.preference`.
 - **Startup housekeeping**: helper logs and scripts, per-restart handshake records, and undelivered notices older than 7 days are pruned from the runtime directory.
@@ -84,7 +84,7 @@ click power → Restart
 [client]  reload
 ```
 
-Four invariants hold this together:
+Five invariants hold this together:
 
 - The helper lives **outside the process tree** (`detached`, a real `.cjs` file — a multi-line `node -e` is mangled by Windows `CreateProcess`), so terminating DSH cannot kill it mid-flight.
 - Success is confirmed by a per-process `instanceId` that must **change**, so a brief outage never fakes it.
@@ -96,7 +96,12 @@ Shutdown posts `/api/dsh-power-button/shutdown` and stops without relaunching. I
 
 ## Desktop
 
-The Desktop application runs the Host as a child of its Electron shell. Exiting that child invokes crash recovery; replaying its command line creates a Host without a window or its original IPC channel. This plugin therefore refuses restart and shutdown in Electron's Node-mode Host: HTTP calls return `503` with `reason: "desktop-unsupported"`, and commands and the model tool report an error. No helper or exit is scheduled. Use the application's Quit menu or tray action, then reopen it; closing the main window can leave the application running in the tray. What a host would have to change for a plugin-driven restart to work is written up in [`docs/desktop-restart-protocol.md`](docs/desktop-restart-protocol.md).
+The Desktop application runs the Host as a child of its Electron shell, so exiting that child invokes the app's crash recovery and replaying its command line yields a Host without a window or its original IPC channel. Two cases, decided by what the host advertises:
+
+- **Host advertises a restart protocol** (`DSH_DESKTOP_RESTART_PROTOCOL` in the Host environment, IPC channel connected): the plugin writes the restart marker, flushes live sessions, and asks the shell to restart; Electron owns the relaunch. If the shell does not take over within 20 seconds, the request fails, the transition is released, and the button works again.
+- **Host advertises nothing** (every released DeepSeek Harness so far): restart and shutdown are refused with `503` and `reason: "desktop-unsupported"`; no helper or exit is scheduled. Use the application's Quit menu or tray action, then reopen it — closing the main window can leave the app running in the tray.
+
+Making the first case available means changing DeepSeek Harness itself, which is outside this plugin's boundary; the steps are in [`docs/desktop-restart-protocol.md`](docs/desktop-restart-protocol.md).
 
 ## Safety
 
@@ -129,10 +134,7 @@ pnpm test             # vitest: unit + process-level acceptance
 pnpm check            # all of the above, in order
 ```
 
-CI runs on Windows, Ubuntu and macOS: both typechecks, tests, build, a gate that the committed `lib/` matches a fresh build byte for byte (a git install runs those artifacts), and a `pnpm pack` check that the tarball contains `lib/` and `cordis.patch.yml`. A separate Linux job repeats the steps on Node **22.19**, the floor `engines.node` declares.
-
-`tests/restart-runtime.spec.ts` executes the exact helper the host generates as a real process against real TCP ports, and pins what unit tests cannot: the full relaunch chain, no relaunch without COMMIT, bounded spawn retries, the health gate refusing a stale instance, a `--port 0` successor landing on the bound port, and the failure diagnoses (`marker-write-failed`, a still-moving session log). Tests isolate `DSH_HOME` via a vitest setup file, so they never touch your real `~/.dsh`.
-
+CI runs both typechecks, tests and build on Windows, Ubuntu and macOS, gates that the committed `lib/` matches a fresh build byte for byte, and checks the `pnpm pack` tarball; a separate Linux job repeats everything on Node **22.19**, the floor `engines.node` declares. `tests/restart-runtime.spec.ts` runs the exact helper the host generates as a real process against real TCP ports - the relaunch chain, no relaunch without COMMIT, bounded spawn retries, a stale instance refused, and the failure diagnoses - and the suite isolates `DSH_HOME`, so it never touches your real `~/.dsh`.
 ## License & Attribution
 
 MIT. The "detached helper relaunch" idea follows [anweat/dsh-restart](https://github.com/anweat/dsh-restart) (MIT); the implementation is independently written (real `.cjs` file, no PowerShell, dynamic port), no code copied.

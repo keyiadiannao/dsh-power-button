@@ -13,7 +13,7 @@
 
 - **侧边栏电源按钮**：注册到页脚操作位（`sidebar.footer.action`），主题自适应，外观与旁边的"设置"按钮一致
 - **重启/关机菜单** + Windows 关机风格全屏过渡；重启确认后页面自动刷新
-- **自包含重启引擎**：写一个 detached 的 `.cjs` helper，经 ARM → COMMIT → ACK 握手接手拉起职责，等旧进程、端口与会话日志都落定后，以相同调用方式与原目录重新拉起 DSH；`--port 0` 命令行会被固定为本进程实际绑定的端口。不使用 PowerShell、不使用 `taskkill`
+- **自包含重启引擎**：写一个 detached 的 `.cjs` helper，经 ARM → COMMIT → ACK 握手接手拉起职责，等旧进程、端口与会话日志都落定后，以相同调用方式与原目录重新拉起 DSH；`--port 0` 命令行会被固定为本进程实际绑定的端口。桌面版若宿主广播了重启协议，则改为交给 Electron 外壳重启。不使用 PowerShell、不使用 `taskkill`
 - **`/restart` 与 `/shutdown` 命令**、**`restart_harness` 模型工具**（名字已被其它插件占用时跳过注册），以及只读的 **`restart_status`** 诊断工具
 - **界面与宿主文案本地化**（中文 / English），跟随 profile 的 `locale.preference`
 - **启动清理**：自动清理运行目录下超过 7 天的 helper 日志与脚本、每次重启的握手记录，以及尚未投递的通知
@@ -84,7 +84,7 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 [客户端] 自动刷新
 ```
 
-四条不变量支撑这套流程：
+五条不变量支撑这套流程：
 
 - helper 必须**脱离进程树**（`detached` + 真实 `.cjs` 文件——多行 `node -e` 会被 Windows `CreateProcess` 破坏），否则终止 DSH 时 helper 一起被杀
 - 重启成功以**每次进程独立的 `instanceId` 变化**为准，短暂离线本身不算成功
@@ -96,7 +96,12 @@ dsh plugin --profile web add "github:keyiadiannao/dsh-power-button#master"
 
 ## 桌面版
 
-桌面应用中 Host 是 Electron 外壳的子进程。退出这个子进程会触发崩溃恢复，重放它的命令行则会生成没有窗口、也没有原 IPC 通道的 Host。因此本插件会拒绝 Electron Node 模式 Host 中的重启和关机：HTTP 调用返回 `503` 与 `reason: "desktop-unsupported"`，命令与模型工具返回错误，不启动 helper，也不安排退出。请通过应用菜单或托盘退出，再重新打开；关闭主窗口可能只会将应用隐藏到托盘。要让插件能驱动重启，宿主需要改什么，写在 [`docs/desktop-restart-protocol.zh-CN.md`](docs/desktop-restart-protocol.zh-CN.md)。
+桌面应用中 Host 是 Electron 外壳的子进程：退出这个子进程会触发应用的崩溃恢复，重放它的命令行则会得到没有窗口、也没有原 IPC 通道的 Host。按宿主是否广播能力分两种情况：
+
+- **宿主广播了重启协议**（Host 环境里有 `DSH_DESKTOP_RESTART_PROTOCOL`，且 IPC 通道已连接）：插件写入重启标记、刷盘在跑的会话，然后请外壳重启，由 Electron 接管拉起。若外壳 20 秒内没有接手，请求按失败返回、操作锁释放，按钮可再次使用。
+- **宿主没有任何广播**（目前所有已发布的 DeepSeek Harness）：重启与关机都被拒绝，返回 `503` 与 `reason: "desktop-unsupported"`，不会派生 helper、也不会安排退出。请用应用菜单或托盘的退出，然后重新打开；只关主窗口可能让应用继续留在托盘里。
+
+要让第一种情况可用，必须修改 DeepSeek Harness 本身，这超出本插件的边界；步骤写在 [`docs/desktop-restart-protocol.zh-CN.md`](docs/desktop-restart-protocol.zh-CN.md)。
 
 ## 安全
 
@@ -129,10 +134,7 @@ pnpm test             # vitest：单元 + 进程级验收
 pnpm check            # 以上按序全跑
 ```
 
-CI 覆盖 Windows / Ubuntu / macOS：两套类型检查、测试、构建、一道"提交的 `lib/` 与重新构建结果逐字节一致"的门禁（git 安装直接运行这些产物），以及 `pnpm pack` 检查发布包确实含 `lib/` 与 `cordis.patch.yml`。另有独立 Linux job 在 **Node 22.19**（`engines.node` 声明的下限）重跑全部步骤。
-
-`tests/restart-runtime.spec.ts` 把宿主生成的**那一份真实 helper** 当独立进程执行，对着真实 TCP 端口跑，钉住单元测试无法证明的行为：完整拉起链、没有 COMMIT 就不拉起、spawn 重试上限、健康门禁拒绝旧实例、`--port 0` 落到实际绑定端口，以及失败诊断（`marker-write-failed`、会话日志仍在变化）。测试通过 vitest setup 隔离 `DSH_HOME`，不会碰你真实的 `~/.dsh`。
-
+CI 在 Windows / Ubuntu / macOS 上跑两套类型检查、测试与构建，并校验提交的 `lib/` 与重新构建结果逐字节一致、`pnpm pack` 产物含 `lib/` 与 `cordis.patch.yml`；另有独立 Linux job 在 **Node 22.19**（`engines.node` 声明的下限）重跑全部步骤。`tests/restart-runtime.spec.ts` 把宿主生成的那一份真实 helper 当独立进程对着真实 TCP 端口跑：完整拉起链、没有 COMMIT 就不拉起、spawn 重试上限、拒绝旧实例、以及各类失败诊断；测试经 vitest setup 隔离 `DSH_HOME`，不会碰你真实的 `~/.dsh`。
 ## License 与致谢
 
 MIT。"detached helper 拉起"的思路参考 [anweat/dsh-restart](https://github.com/anweat/dsh-restart)（MIT）；实现为独立编写（真实 `.cjs` 文件、不使用 PowerShell、动态端口），未复制其代码。

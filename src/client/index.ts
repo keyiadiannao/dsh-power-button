@@ -296,6 +296,14 @@ export function beginPower(next: PowerAction): void {
         }
       } else if (result.kind === 'response' && result.ok) {
         const body = objectValue(result.body)
+        // A handed-over Desktop restart can fail after the request was accepted: the shell
+        // never takes over and the host releases the transition. Report it now instead of
+        // waiting out the whole restart budget.
+        const handoverFailure = typeof body?.powerFailure === 'string' ? body.powerFailure : null
+        if (handoverFailure !== null) {
+          fail(handoverFailure, true)
+          return
+        }
         const claimed = objectValue(body?.restart)
         const confirmed = accepted && (restartId !== null
           ? claimed?.restartId === restartId
