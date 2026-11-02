@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
-  beginPower, dismissPower, getRestartError, getRestartPhase,
+  beginPower, dismissPower, getRestartError, getRestartErrorReason, getRestartPhase, getRestartRetryable,
 } from '../src/client/index.ts'
 import { BROWSER_REQUEST_WAIT_MS, RESTART_FLOW_WAIT_MS, SHUTDOWN_FLOW_WAIT_MS } from '../src/protocol.ts'
 
@@ -18,6 +18,52 @@ afterEach(() => {
   vi.clearAllTimers()
   vi.useRealTimers()
   vi.unstubAllGlobals()
+})
+
+describe('error retry gating', () => {
+  // Retrying a power action is not a pure front-end repeat: it sends another real
+  // request. The overlay therefore offers retry only when the outcome is known to be
+  // "nothing happened", and the Desktop refusal becomes guidance instead.
+  async function failWith(body: object, status: number): Promise<void> {
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => (
+      init?.method === 'POST' ? reply(body, status) : reply({ instanceId: 'old' })
+    )))
+    beginPower('restart')
+    await vi.advanceTimersByTimeAsync(50)
+  }
+
+  it('marks the Desktop refusal as guidance, not as retryable', async () => {
+    await failWith({ ok: false, reason: 'desktop-unsupported', error: 'desktop is unsupported' }, 503)
+    expect(getRestartPhase()).toBe('error')
+    expect(getRestartErrorReason()).toBe('desktop-unsupported')
+    expect(getRestartRetryable()).toBe(false)
+  })
+
+  it('does not offer a retry for an authentication refusal or a busy host', async () => {
+    await failWith({ ok: false, error: 'forbidden' }, 403)
+    expect(getRestartRetryable()).toBe(false)
+    dismissPower()
+    await failWith({ ok: false, error: 'busy' }, 409)
+    expect(getRestartRetryable()).toBe(false)
+  })
+
+  it('offers a retry when the host answered with a server error', async () => {
+    await failWith({ ok: false, error: 'marker write failed' }, 500)
+    expect(getRestartRetryable()).toBe(true)
+  })
+
+  it('claims a host that never answered as retryable only when the request was not sent', async () => {
+    // A thrown request means nothing reached the host. A request that was sent but
+    // never answered is the opposite case: retrying could repeat a real action.
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+      if (init?.method === 'POST') throw new Error('network unreachable')
+      return reply({ instanceId: 'old' })
+    }))
+    beginPower('restart')
+    await vi.advanceTimersByTimeAsync(50)
+    expect(getRestartPhase()).toBe('error')
+    expect(getRestartRetryable()).toBe(true)
+  })
 })
 
 describe('power operation polling', () => {

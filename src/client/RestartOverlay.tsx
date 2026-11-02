@@ -17,7 +17,8 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import {
-  getRestartPhase, getPowerAction, getRestartError, onRestartChange, beginPower, dismissPower, NS,
+  getRestartPhase, getPowerAction, getRestartError, getRestartRetryable, getRestartErrorReason,
+  onRestartChange, beginPower, dismissPower, NS,
 } from './index.ts'
 import { motion, veil } from './theme.ts'
 
@@ -155,6 +156,8 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
   const phase = useSyncExternalStore(onRestartChange, getRestartPhase)
   const action = useSyncExternalStore(onRestartChange, getPowerAction)
   const error = useSyncExternalStore(onRestartChange, getRestartError)
+  const retryable = useSyncExternalStore(onRestartChange, getRestartRetryable)
+  const errorReason = useSyncExternalStore(onRestartChange, getRestartErrorReason)
 
   // Modal focus: when the overlay appears, move focus into the dialog so
   // keyboard focus is not left behind on the sidebar/trigger (aria-modal).
@@ -310,9 +313,26 @@ export function RestartOverlay(props: RestartOverlayProps): JSX.Element | null {
       </div>
 
       {phase === 'error' ? (
-        <div style={{ ...ACTION_ROW, animation: 'dsh-restart-fade 0.35s ease 0.15s both' }}>
-          <ActionButton label={t('retry')} onClick={() => beginPower(action)} />
-          <ActionButton label={t('close')} onClick={dismissPower} />
+        <div style={{ ...ACTION_ROW, animation: 'dsh-restart-fade 0.35s ease 0.15s both', flexDirection: 'column', gap: 10 }}>
+          {errorReason === 'desktop-unsupported' ? (
+            <div style={{ ...SUB, maxWidth: 420, textAlign: 'center' }}>{t('desktopGuide')}</div>
+          ) : null}
+          <div style={{ display: 'flex', gap: 12 }}>
+            {errorReason === 'desktop-unsupported' ? (
+              <ActionButton
+                label={t('copyGuide')}
+                onClick={() => {
+                  // The reader is an agent: copy the instruction rather than adding a menu.
+                  void navigator.clipboard?.writeText(t('desktopGuide') + ' docs/desktop-restart-protocol.md')
+                }}
+              />
+            ) : retryable ? (
+              // Retry only when nothing was committed: a restart is not a pure front-end
+              // action, so repeating a refused or already-sent request repeats it for real.
+              <ActionButton label={t('retry')} onClick={() => beginPower(action)} />
+            ) : null}
+            <ActionButton label={t('close')} onClick={dismissPower} />
+          </div>
         </div>
       ) : null}
     </div>

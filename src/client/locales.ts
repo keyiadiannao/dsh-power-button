@@ -56,6 +56,9 @@ export const zh = {
   trustOriginMismatch: 'Origin 与 Host 权威不相等。若 Host 带端口而 Origin 不带，属于已报告的浏览器行为。',
   retry: '重试',
   close: '关闭',
+  requestNotSent: '请求未能发出，请检查连接后重试。',
+  desktopGuide: '也可以让 Agent 按适配文档评估本地改造（需你授权）。',
+  copyGuide: '复制给 Agent',
   // toast — restart complete (UI-only, never written into the session log)
   restartedToast: '已重启',
   restartedToastSub: 'DeepSeek Harness 已重启完成',
@@ -110,6 +113,9 @@ export const en = {
   trustOriginMismatch: 'The Origin does not equal the Host authority. If the Host carries a port and the Origin does not, that is a reported browser behaviour.',
   retry: 'Retry',
   close: 'Close',
+  requestNotSent: 'The request could not be sent. Check the connection and retry.',
+  desktopGuide: 'Alternatively, let an agent evaluate the documented local change (requires your approval).',
+  copyGuide: 'Copy for agent',
   // toast — restart complete (UI-only, never written into the session log)
   restartedToast: 'Restarted',
   restartedToastSub: 'DeepSeek Harness restarted successfully',

@@ -97,6 +97,8 @@ let phase: RestartPhase = 'idle'
 let action: PowerAction = 'restart'
 let errorMsg: string | null = null
 let errorRetryable = false
+/** Stable server reason for the current error, when it reported one. */
+let errorReason: string | null = null
 const listeners = new Set<() => void>()
 
 /** Locale service captured at apply time; used to translate module-scope
@@ -117,9 +119,10 @@ export function getRestartPhase(): RestartPhase { return phase }
 export function getPowerAction(): PowerAction { return action }
 export function getRestartError(): string | null { return errorMsg }
 export function getRestartRetryable(): boolean { return errorRetryable }
+export function getRestartErrorReason(): string | null { return errorReason }
 
 /** Surface an error, unless the flow has already moved past the point of no return. */
-function fail(msg: string, retryable = false): void {
+function fail(msg: string, retryable = false, reason: string | null = null): void {
   if (phase === 'error' || phase === 'recovering') return
   operationId += 1
   stopCurrentOperation?.()
@@ -127,6 +130,7 @@ function fail(msg: string, retryable = false): void {
   phase = 'error'
   errorMsg = msg
   errorRetryable = retryable
+  errorReason = reason
   emit()
 }
 
@@ -193,6 +197,7 @@ export function beginPower(next: PowerAction): void {
   action = next
   errorMsg = null
   errorRetryable = false
+  errorReason = null
 
   const endpoint = next === 'shutdown' ? '/api/dsh-power-button/shutdown' : '/api/dsh-power-button/restart'
   const timeout = next === 'shutdown' ? SHUTDOWN_FLOW_WAIT_MS : RESTART_FLOW_WAIT_MS
@@ -220,10 +225,21 @@ export function beginPower(next: PowerAction): void {
   let restartId: string | null = null
   const send = (): void => {
     void requestJson(endpoint, { method: 'POST', keepalive: true, signal: controller.signal }, timeout).then((response) => {
-      if (!active() || response.kind !== 'response') return
+      if (!active()) return
+      if (response.kind !== 'response') {
+        // The request never reached the host, so nothing was committed and a retry is
+        // safe. A timeout is NOT this case: there the host may already have acted.
+        fail(tl('requestNotSent'), response.kind === 'unavailable')
+        return
+      }
       const body = objectValue(response.body)
       if (!response.ok || body?.ok === false) {
-        fail(describeFailure(response.body, response.status), response.status !== 409)
+        const reason = typeof body?.reason === 'string' ? body.reason : null
+        // Retry only when the host answered with something that can change. A refusal
+        // (Desktop surface, authentication, another operation in flight) cannot, and a
+        // restart is not a pure front-end action: retrying sends a second real request.
+        const retryable = response.status >= 500 && reason !== 'desktop-unsupported'
+        fail(describeFailure(response.body, response.status), retryable, reason)
       } else if (body?.ok === true) {
         accepted = true
         restartId = typeof body.restartId === 'string' ? body.restartId : null
@@ -309,6 +325,7 @@ export function dismissPower(): void {
   phase = 'idle'
   errorMsg = null
   errorRetryable = false
+  errorReason = null
   emit()
 }
 
