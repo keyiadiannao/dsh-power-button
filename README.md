@@ -136,3 +136,5 @@ CI runs on Windows, Ubuntu and macOS: both typechecks, tests, build, a gate that
 ## License & Attribution
 
 MIT. The "detached helper relaunch" idea follows [anweat/dsh-restart](https://github.com/anweat/dsh-restart) (MIT); the implementation is independently written (real `.cjs` file, no PowerShell, dynamic port), no code copied.
+
+Thanks to [@qq1131909103](https://github.com/qq1131909103): PR #8 established that the Desktop Host belongs to the Electron shell, which is why this plugin refuses power actions there instead of spawning a competing Host, and what `docs/desktop-restart-protocol.md` is built on.

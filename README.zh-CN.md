@@ -136,3 +136,5 @@ CI 覆盖 Windows / Ubuntu / macOS：两套类型检查、测试、构建、一�
 ## License 与致谢
 
 MIT。"detached helper 拉起"的思路参考 [anweat/dsh-restart](https://github.com/anweat/dsh-restart)（MIT）；实现为独立编写（真实 `.cjs` 文件、不使用 PowerShell、动态端口），未复制其代码。
+
+感谢 [@qq1131909103](https://github.com/qq1131909103)：PR #8 指出桌面端 Host 归 Electron 外壳所有。本插件在桌面端拒绝电源操作、而不是另起一个竞争 Host，以及 `docs/desktop-restart-protocol.md` 的出发点，都来自这个判断。
